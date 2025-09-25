@@ -1,13 +1,12 @@
 # streamlit_app_v7.py
 # v7 — Fristående från v6 (egna data-/modellmappar), E0–E2, manuell tipsrad, säkra hemligheter
-# - Laddar E0–E2 (Premier, Championship, League One) från football-data.co.uk
-# - Namn-normalisering (Bradford/Bradford C → Bradford City, osv)
-# - Robust laglista byggd från rådata (rensar gamla cachefiler när CSV ändras)
-# - Timeout/retries vid nedladdning
-# - Manuell tipsrad (13 rader) med valfria ligataggar "(E0)/(E1)/(E2)" var som helst på raden
-# - Fallback till GPT-kortanalys om en match saknar data i E0–E2
-# - SÄKER hemlighetshämtning (ingen krasch när .streamlit/secrets.toml saknas)
-# - PÅVERKAR INTE v6 (använder data_v7/ och models_v7/)
+# Baseras på din nyare v6.8 med:
+# - Unifierad dash-parsning (–/—/− → '-')
+# - Snapshot-hjälpare (senaste rad hemma/borta eller någon sida)
+# - Förbättrade halvgarderingar (osäkerhets-/entropi-baserat val)
+# - ELOΔ i tabellens "Stats"-kolumn
+# - SÄKER hemlighetshämtning (ingen krasch om .streamlit/secrets.toml saknas)
+# - Separata mappar (data_v7/, models_v7/) och modellfil (model_v7.pkl) → påverkar inte v6
 
 from __future__ import annotations
 
@@ -16,6 +15,7 @@ import re
 import json
 import time
 import glob
+import math
 import hashlib
 from pathlib import Path
 from datetime import datetime
@@ -36,7 +36,6 @@ try:
     _HAS_OPENAI = True
 except Exception:
     _HAS_OPENAI = False
-
 
 # =======================
 #   Grundinställningar
@@ -62,7 +61,6 @@ def _season_code() -> str:
 
 SEASON = _season_code()
 
-
 # =======================
 #   Hjälpfunktioner
 # =======================
@@ -76,27 +74,45 @@ def _hash_file(path: str) -> str:
 def _norm_space(s: str) -> str:
     return " ".join(str(s).strip().split())
 
-# Football-Data → standardnamn
+def _unify_dash(s: str) -> str:
+    # Tolka – (en-dash), — (em-dash) och − (minus) som bindestreck
+    return re.sub(r"[–—−]", "-", s)
+
+# Football-Data → standardnamn (inkl. vanliga kortformer)
 TEAM_ALIASES = {
     "Bradford": "Bradford City",
     "Bradford C": "Bradford City",
     "Bradford City": "Bradford City",
+
     "Cardiff": "Cardiff City",
     "Cardiff C": "Cardiff City",
     "Cardiff City": "Cardiff City",
+
     "Man United": "Manchester United",
     "Man Utd": "Manchester United",
     "Man City": "Manchester City",
+
     "Sheffield Wed": "Sheffield Wednesday",
     "Sheff Wed": "Sheffield Wednesday",
+    "Sheffield Wed.": "Sheffield Wednesday",
     "Sheffield Utd": "Sheffield United",
     "Sheff Utd": "Sheffield United",
+
     "QPR": "Queens Park Rangers",
+    "Queens Park Rangers": "Queens Park Rangers",
+
     "MK Dons": "Milton Keynes Dons",
+
+    # Wolves / Forest-varianter
     "Wolves": "Wolverhampton Wanderers",
     "Wolverhampton": "Wolverhampton Wanderers",
-    "Nottingham": "Nottingham Forest",
+    "Wolverhampton W": "Wolverhampton Wanderers",
+    "Wolverhampton Wanderers": "Wolverhampton Wanderers",
+
+    "Nott'm Forest": "Nottingham Forest",
+    "Nottm Forest": "Nottingham Forest",
     "Nottingham F": "Nottingham Forest",
+    "Nottingham": "Nottingham Forest",
     "Nottingham Forest": "Nottingham Forest",
 }
 
@@ -113,23 +129,20 @@ def _safe_secret(key: str) -> Optional[str]:
     """
     SÄKER hemlighetshämtning.
     - Försök env först (Render/Heroku m.fl.)
-    - Försök st.secrets endast om det finns och är laddat, och använd `in` för att undvika parse-fel
-    - Returnerar None om inget hittas
+    - Försök st.secrets endast om det finns och är laddat; använd 'in' för att undvika parse-fel.
     """
     val = os.getenv(key)
     if val:
         return val
     try:
-        if hasattr(st, "secrets"):
-            if key in st.secrets:     # viktigt: använd 'in', inte get()
-                return st.secrets[key]
+        if hasattr(st, "secrets") and (key in st.secrets):
+            return st.secrets[key]
     except Exception:
         pass
     return None
 
 def _has_openai_key() -> bool:
     return bool(_HAS_OPENAI and _safe_secret("OPENAI_API_KEY"))
-
 
 # =======================
 #   HTTP med retries
@@ -146,7 +159,6 @@ def _http_get(url: str, timeout: float = 10.0) -> Optional[bytes]:
         return r.content
     except Exception:
         return None
-
 
 # =======================
 #   Nedladdning & laddning
@@ -201,7 +213,6 @@ def load_all_data(files: Tuple[str, ...]) -> pd.DataFrame:
         except Exception:
             continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-
 
 # =======================
 #   Features: form + ELO
@@ -267,7 +278,6 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     feature_cols = ["HomeFormPts5", "HomeFormGD5", "AwayFormPts5", "AwayFormGD5", "HomeElo", "AwayElo"]
     return df, feature_cols
 
-
 # =======================
 #   Modell (XGBoost)
 # =======================
@@ -307,7 +317,6 @@ def load_or_train_model(df_signature: Tuple[int, int] | None,
 def predict_probs(model: XGBClassifier, features: List[float], feature_cols: List[str]) -> np.ndarray:
     X = pd.DataFrame([features], columns=feature_cols)
     return model.predict_proba(X)[0]
-
 
 # =======================
 #   Laglista (alltid färsk)
@@ -361,7 +370,6 @@ def load_or_create_team_labels(df_raw: pd.DataFrame, leagues: List[str], files_s
         except Exception:
             pass
     return labels
-
 
 # =======================
 #   OpenAI (fredagsanalys)
@@ -427,7 +435,6 @@ def gpt_predict_for_unknown(client, home: str, away: str) -> str:
     except Exception as e:
         return f"(Ingen GPT-fallback: {e})"
 
-
 # =======================
 #   Manuell tipsrad: tolkare
 # =======================
@@ -444,7 +451,7 @@ def _extract_league_tag(text: str) -> Tuple[str, Optional[str]]:
 
 def parse_manual_lines(s: str, expected_n: int) -> List[Tuple[str, str, Optional[str]]]:
     """
-    Tar tex:
+    Exempel:
       "Fulham - Brentford"
       "Man United (E0) - Chelsea"
       "Derby - Preston (E1)"
@@ -452,7 +459,7 @@ def parse_manual_lines(s: str, expected_n: int) -> List[Tuple[str, str, Optional
     """
     out = []
     for raw in s.splitlines():
-        line = raw.strip()
+        line = _unify_dash(raw.strip())  # —/–/− → '-'
         if not line:
             continue
         line, tag = _extract_league_tag(line)
@@ -466,6 +473,64 @@ def parse_manual_lines(s: str, expected_n: int) -> List[Tuple[str, str, Optional
             break
     return out
 
+# =======================
+#   Guards (återinsatta)
+# =======================
+def _extract_probs_generic(p) -> List[float]:
+    """Accepterar (p1, px, p2) eller dict med valfria nycklar."""
+    if isinstance(p, dict):
+        def get_any(d, keys, default=0.0):
+            for k in keys:
+                if k in d:
+                    return float(d[k])
+            return default
+        ph = get_any(p, ('1','H','home','Home','HOME'))
+        px = get_any(p, ('X','D','draw','Draw','DRAW'))
+        pa = get_any(p, ('2','A','away','Away','AWAY'))
+        probs = [ph, px, pa]
+    else:
+        probs = list(p)
+
+    probs = [max(1e-12, float(x)) for x in probs[:3]]
+    s = sum(probs)
+    if s <= 0:
+        probs = [1/3, 1/3, 1/3]
+    else:
+        probs = [x/s for x in probs]
+    return probs
+
+def _pick_half_guards(match_probs: List[Optional[np.ndarray]], n_half: int) -> List[int]:
+    """
+    Välj index (0-baserat) för halvgarderingar bland matcherna.
+    Strategi: välj de mest osäkra matcherna – minst skillnad mellan bästa och näst bästa utfall.
+    """
+    if not match_probs or n_half <= 0:
+        return []
+    scored = []
+    for i, p in enumerate(match_probs):
+        if p is None:
+            # Saknar data → relativt osäker; ge hög prioritet
+            scored.append((0.0, 0.0, i))
+            continue
+        probs = _extract_probs_generic(p)
+        a, b, c = sorted(probs, reverse=True)
+        margin = a - b
+        entropy = -sum(q*math.log(q) for q in probs)
+        scored.append((margin, -entropy, i))
+    scored.sort(key=lambda t: (t[0], t[1]))  # minst margin först
+    k = min(int(n_half), len(scored))
+    return [i for _, __, i in scored[:k]]
+
+def _halfguard_sign(probs_like) -> str:
+    """
+    Returnera halvgardering som sträng: '1X', 'X2' eller '12' genom att
+    ta bort det minst sannolika utfallet.
+    """
+    probs = _extract_probs_generic(probs_like)
+    mapping = {0: '1', 1: 'X', 2: '2'}
+    least = int(np.argmin(probs))
+    keep = [mapping[i] for i in range(3) if i != least]
+    return "".join(keep)
 
 # =======================
 #   UI – sidomeny
@@ -569,12 +634,11 @@ if st.button("↻ Ladda om CSV-filer", use_container_width=True,
     except Exception as e:
         st.error(f"Något gick fel vid omladdning: {e}")
 
-
 # =======================
 #   Huvud – inputs
 # =======================
 n_matches = st.number_input("Antal matcher att tippa", min_value=1, max_value=13, value=13, step=1)
-# default 0 halvgarderingar (enligt din önskan)
+# default 0 halvgarderingar
 n_half = st.number_input("Antal halvgarderingar", min_value=0, max_value=int(n_matches), value=0, step=1)
 
 st.markdown("### Förifyll tipsrad (manuellt)")
@@ -605,56 +669,27 @@ if len(manual_pairs) == int(n_matches):
 else:
     st.info(f"Upptäckte {len(manual_pairs)} manuella rader (av {n_matches}). Tomma/felaktiga rader ignoreras.")
 
-
 # =======================
-#   Match → features
+#   Snapshot-hjälpare (v6.8 nya)
 # =======================
-def _latest_rows_for_match(df_feat: pd.DataFrame,
-                           home: str, away: str,
-                           league_hint: Optional[str]) -> Tuple[Optional[pd.Series], Optional[pd.Series], Optional[str]]:
+def _team_snapshot(df_feat: pd.DataFrame, team: str, league_hint: Optional[str]) -> Optional[Tuple[float, float, float, str]]:
     """
-    Hitta senaste rader (en rad vardera) för hemmasidan resp. bortasidan.
-    Om league_hint (E0/E1/E2) ges filtrerar vi mot den ligan.
-    Returnerar (h_row, a_row, league_used)
+    Hämtar senaste *valfri* matchrad för laget (hemma eller borta).
+    Returnerar (form_pts, form_gd, elo, league_used) eller None om inget hittas.
     """
-    df = df_feat
-    if league_hint:
-        df = df[df["League"] == league_hint]
-
-    h_row = df[(df["HomeTeam"] == home)].sort_values("Date").tail(1)
-    a_row = df[(df["AwayTeam"] == away)].sort_values("Date").tail(1)
-
-    if (h_row.empty or a_row.empty) and league_hint:
-        df2 = df_feat
-        h2 = df2[(df2["HomeTeam"] == home)].sort_values("Date").tail(1)
-        a2 = df2[(df2["AwayTeam"] == away)].sort_values("Date").tail(1)
-        if not h2.empty and not a2.empty:
-            return h2.iloc[0], a2.iloc[0], league_hint
-    if not h_row.empty and not a_row.empty:
-        used = league_hint if league_hint else (h_row.iloc[0]["League"] if pd.notna(h_row.iloc[0]["League"]) else None)
-        return h_row.iloc[0], a_row.iloc[0], used
-    return None, None, league_hint
-
-def _pick_half_guards(match_probs: List[Optional[np.ndarray]], n_half: int) -> set:
-    if n_half <= 0:
-        return set()
-    margins = []
-    for i, p in enumerate(match_probs):
-        if p is None or len(p) != 3 or np.sum(p) == 0:
-            margins.append((i, 1.0))
-            continue
-        s = np.sort(p)
-        margin = s[-1] - s[-2]
-        margins.append((i, margin))
-    margins.sort(key=lambda x: x[1])
-    return {i for i, _ in margins[:n_half]}
-
-def _halfguard_sign(probs: np.ndarray) -> str:
-    idxs = np.argsort(probs)[-2:]
-    idxs = tuple(sorted(map(int, idxs)))
-    mapping = {(0, 1): "1X", (0, 2): "12", (1, 2): "X2"}
-    return mapping.get(idxs, "1X")
-
+    df = df_feat if not league_hint else df_feat[df_feat["League"] == league_hint]
+    sub = df[(df["HomeTeam"] == team) | (df["AwayTeam"] == team)].sort_values("Date")
+    if sub.empty and league_hint:
+        sub = df_feat[(df_feat["HomeTeam"] == team) | (df_feat["AwayTeam"] == team)].sort_values("Date")
+    if sub.empty:
+        return None
+    row = sub.tail(1).iloc[0]
+    if row["HomeTeam"] == team:
+        pts = float(row["HomeFormPts5"]); gd = float(row["HomeFormGD5"]); elo = float(row["HomeElo"])
+    else:
+        pts = float(row["AwayFormPts5"]); gd = float(row["AwayFormGD5"]); elo = float(row["AwayElo"])
+    lg = str(row["League"]) if "League" in row and pd.notna(row["League"]) else (league_hint or "—")
+    return pts, gd, elo, lg
 
 # =======================
 #   Körning
@@ -671,49 +706,52 @@ if st.button("Tippa matcher", use_container_width=True):
         pairs_to_use = []  # användaren får korrigera texten
 
     for (home, away, lg_hint) in pairs_to_use:
-        h_row, a_row, used_lg = _latest_rows_for_match(df_prep, home, away, lg_hint)
+        hs = _team_snapshot(df_prep, home, lg_hint)
+        as_ = _team_snapshot(df_prep, away, lg_hint)
 
-        if (h_row is None) or (a_row is None):
+        if (hs is None) or (as_ is None):
             match_probs.append(None)
-            match_meta.append((home, away, used_lg or "—", 0, 0, 0, 0, 0, 0))
+            match_meta.append((home, away, lg_hint or "—", 0, 0, 0, 0, 0, 0))
             continue
 
-        features = [
-            float(h_row["HomeFormPts5"]),
-            float(h_row["HomeFormGD5"]),
-            float(a_row["AwayFormPts5"]),
-            float(a_row["AwayFormGD5"]),
-            float(h_row["HomeElo"]),
-            float(a_row["AwayElo"]),
-        ]
+        hfp, hfgd, helo, hlg = hs
+        afp, afgd, aelo, alg = as_
+        used_lg = lg_hint or hlg or alg or "—"
+
+        features = [hfp, hfgd, afp, afgd, helo, aelo]
         probs = predict_probs(model, features, feat_cols)
         match_probs.append(probs)
-        match_meta.append(
-            (home, away, used_lg or str(h_row.get("League", "—")),
-             features[0], features[1], features[2], features[3], features[4], features[5])
-        )
+        match_meta.append((home, away, used_lg, hfp, hfgd, afp, afgd, helo, aelo))
 
     # Halvgarderingar
     half_idxs = _pick_half_guards(match_probs, int(n_half))
 
-    # Tabell
+    # Tabell + tipsrad
     for idx in range(1, len(pairs_to_use) + 1):
         home_label, away_label, _ = pairs_to_use[idx - 1]
         probs = match_probs[idx - 1]
+        meta = match_meta[idx - 1]
 
         if (probs is None) or (len(probs) != 3) or float(np.sum(probs)) == 0.0:
-            tecken, pct = "(X)", ""
+            sign_display, pct, elo_delta = "(X)", "", ""
+            tecken_list.append("(X)")
         else:
             if (idx - 1) in half_idxs:
-                tecken, pct = f"({_halfguard_sign(probs)})", "-"
+                hg = _halfguard_sign(probs)
+                sign_display, pct = f"({hg})", "-"
+                tecken_list.append(f"({hg})")
             else:
                 pred = int(np.argmax(probs))
-                tecken, pct = f"({['1','X','2'][pred]})", f"{probs[pred]*100:.1f}%"
+                sign = ['1','X','2'][pred]
+                sign_display, pct = f"({sign})", f"{probs[pred]*100:.1f}%"
+                tecken_list.append(f"({sign})")
+            # Stats: ELOΔ
+            _, _, _, _, _, _, _, helo, aelo = meta
+            elo_delta = f"{helo - aelo:+.0f}"
 
-        rows.append([idx, "", f"{home_label} - {away_label}", tecken, "", "", pct])
-        tecken_list.append(tecken)
+        rows.append([idx, f"{home_label} - {away_label}", sign_display, pct, elo_delta])
 
-    df_out = pd.DataFrame(rows, columns=["#", "Status", "Match", "Tecken", "Res.", "%", "Stats"])
+    df_out = pd.DataFrame(rows, columns=["#", "Match", "Tecken", "%", "ELOΔ"])
     st.subheader("Resultat-tabell")
     st.dataframe(df_out, use_container_width=True)
 
@@ -740,7 +778,6 @@ if st.button("Tippa matcher", use_container_width=True):
                     st.markdown(f"**{i}) {home_team} ({lg}) - {away_team}**")
                     st.write(summary)
                 else:
-                    # Ingen E0–E2-data → försiktig GPT-fallback om nyckel finns
                     if _has_openai_key():
                         fallback = gpt_predict_for_unknown(client, home_team, away_team)
                     else:
