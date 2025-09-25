@@ -1,15 +1,43 @@
+"""
+data_loader.py
+
+Robust modul för att hämta fotbollsdata från:
+1) football-data.co.uk (CSV-filer per säsong/ligakod)
+2) api-football.com (fixtures via REST API)
+
+Kräver:
+- requests
+- python-dotenv (för att läsa API-nyckel från .env)
+
+Skapa .env i projektets rot med:
+API_FOOTBALL_KEY="din_nya_hemliga_api_nyckel_här"
+"""
+
+from __future__ import annotations
+
 import os
 import time
 from pathlib import Path
 import requests
 import logging
+from typing import List, Optional
+
+# Nytt: läs miljövariabler från .env
+from dotenv import load_dotenv
+
+# Ladda .env direkt vid import
+load_dotenv()
 
 # Konfigurera en enkel logger för modulen
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# === Konstanter ===
+# === Konstanter (Football-Data CSV) ===
 DATA_DIR = Path("data")
 BASE_URL = "https://www.football-data.co.uk/mmz4281"
+
+# === API-Football Konstanter ===
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
+API_FOOTBALL_URL = "https://v3.football.api-sports.io"
 
 
 def _http_get(url: str, session: requests.Session, timeout: float = 10.0) -> bytes | None:
@@ -107,3 +135,62 @@ def download_season_data(season_code: str, leagues: list[str]) -> list[Path]:
 
     # d) Returnera lista med sparade paths
     return saved_paths
+
+
+def get_api_fixtures(league_id: int, season: int) -> list[dict] | None:
+    """
+    Hämta kommande matcher (fixtures) från api-football.com.
+
+    Parametrar
+    ----------
+    league_id : int
+        API-specifikt ID för ligan (t.ex. 39 för Premier League).
+    season : int
+        Året då säsongen startade (t.ex. 2024 för säsongen 2024/2025).
+
+    Returnerar
+    ----------
+    list[dict] | None
+        En lista av dictionaries, där varje dictionary representerar en match.
+        Returnerar None om anropet misslyckas.
+    """
+    # a) Säkerhetskontroll för API-nyckel
+    if not API_FOOTBALL_KEY:
+        logging.error("API-nyckel (API_FOOTBALL_KEY) är inte konfigurerad i .env-filen.")
+        return None
+
+    # b) Definiera headers och parametrar
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    params = {"league": str(league_id), "season": str(season)}
+    endpoint_url = f"{API_FOOTBALL_URL}/fixtures"
+
+    logging.info("Hämtar fixtures från API-Football för liga %s, säsong %s", league_id, season)
+
+    # c) Gör API-anrop
+    try:
+        response = requests.get(endpoint_url, headers=headers, params=params, timeout=20)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logging.error("API-anrop till %s misslyckades: %s", endpoint_url, exc)
+        return None
+
+    # d) Bearbeta svaret
+    try:
+        data = response.json()
+    except ValueError as exc:
+        logging.error("Kunde inte tolka JSON-svar från API-Football: %s", exc)
+        return None
+
+    # e) Validera och returnera data
+    errors = data.get("errors")
+    if errors:
+        logging.error("API-Football returnerade ett fel: %s", errors)
+        return None
+
+    results = data.get("response")
+    if isinstance(results, list) and results:
+        logging.info("Hämtade framgångsrikt %d fixtures.", len(results))
+        return results
+    else:
+        logging.warning("API-Football returnerade inga fixtures för de angivna parametrarna.")
+        return None
