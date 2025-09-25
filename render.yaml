@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: fotbollspredictor-v7
+    env: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app_v7.py --server.port $PORT --server.address 0.0.0.0
