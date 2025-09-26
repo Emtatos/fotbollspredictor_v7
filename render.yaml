@@ -1,8 +1,32 @@
 services:
   - type: web
-    name: fotbollspredictor-v7
+    name: fotbollsmodellen-v7
     env: python
     plan: free
-    autoDeploy: true
-    buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run streamlit_app_v7.py --server.port $PORT --server.address 0.0.0.0
+    region: frankfurt
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: >
+      streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: STREAMLIT_SERVER_HEADLESS
+        value: "true"
+      - key: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+        value: "false"
+      # Lägg INTE hemligheter här i klartext; sätt dem i Render UI:
+      # OPENAI_API_KEY, API_FOOTBALL_KEY
+    # (Valfritt) Persistent Disk om du vill spara modeller/data mellan restarts
+    # OBS: Vår kod skriver till ./models och ./data; vi symlänkar dem till disken.
+    disks:
+      - name: appdata
+        mountPath: /var/appdata
+    # Postdeploy: skapa symlänkar så att ./models och ./data pekar på persistent disk
+    # Körs vid varje deploy (ej restart).
+    postDeployCommand: |
+      mkdir -p /var/appdata/models /var/appdata/data
+      rm -rf models data
+      ln -s /var/appdata/models models
+      ln -s /var/appdata/data data
