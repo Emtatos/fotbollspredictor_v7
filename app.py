@@ -170,6 +170,7 @@ else:
 # ==============================================================================
 #  FELSÖKNINGSVERKTYG
 # ==============================================================================
+if st.query_params.get("debug") == "true":
 st.divider()
 with st.expander("DEBUG: Inspektera Lagnamn i Dataset"):
     if df_features is not None and not df_features.empty:
