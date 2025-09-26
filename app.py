@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 from pathlib import Path
 import logging
@@ -6,13 +7,12 @@ import numpy as np
 import os
 from datetime import datetime
 
-# Importera nödvändiga funktioner från våra moduler
+# Importera ALLA nödvändiga funktioner
 from main import run_pipeline, get_current_season_code
 from model_handler import load_model
 from xgboost import XGBClassifier
-from ui_utils import parse_match_input
-# VIKTIGT: Vi importerar INTE halvgarderingsfunktionerna i denna version
-# from utils import normalize_team_name (importeras via ui_utils)
+from ui_utils import parse_match_input, pick_half_guards, get_halfguard_sign
+from utils import normalize_team_name
 
 # Sätt upp sidans konfiguration och titel
 st.set_page_config(page_title="Fotbollsmodellen V7", layout="wide")
@@ -78,27 +78,52 @@ else:
         default_matches = ("Crystal Palace - Liverpool\nManchester City - Burnley\nLeeds - Bournemouth\nCharlton - Blackburn\nOxford - Sheffield United\nPreston - Bristol City\nSheffield Wednesday - Queens Park Rangers\nSouthampton - Middlesbrough\nStoke City - Norwich City\nWatford - Hull")
         match_input = st.text_area("Klistra in dina matcher, en per rad.", value=default_matches, height=250)
         
+        num_matches = len(match_input.strip().split('\n')) if match_input.strip() else 0
+        num_guards = st.number_input("Antal halvgarderingar att föreslå:", min_value=0, max_value=num_matches, value=3, step=1)
+
         if st.button("Tippa Matcher", type="primary", use_container_width=True):
             parsed_matches = parse_match_input(match_input)
             
             if not parsed_matches:
                 st.error("Kunde inte tolka några matcher. Kontrollera formatet.")
             else:
-                results = []
+                match_probs_list = []
                 for home_team, away_team in parsed_matches:
                     home_stats = get_team_snapshot(home_team, df_features)
                     away_stats = get_team_snapshot(away_team, df_features)
 
                     if home_stats is None or away_stats is None:
-                        results.append({"Match": f"{home_team} - {away_team}", "Tips": "Data saknas"})
-                    else:
-                        h_form_pts, h_form_gd, h_elo = (home_stats['HomeFormPts'], home_stats['HomeFormGD'], home_stats['HomeElo']) if home_stats['HomeTeam'] == home_team else (home_stats['AwayFormPts'], home_stats['AwayFormGD'], home_stats['AwayElo'])
-                        a_form_pts, a_form_gd, a_elo = (away_stats['HomeFormPts'], away_stats['HomeFormGD'], away_stats['HomeElo']) if away_stats['HomeTeam'] == away_team else (away_stats['AwayFormPts'], away_stats['AwayFormGD'], away_stats['AwayElo'])
-                        feature_vector = np.array([[h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo]])
-                        probs = model.predict_proba(feature_vector)[0]
-                        prediction = np.argmax(probs)
-                        sign = ['1', 'X', '2'][prediction]
-                        results.append({"Match": f"{home_team} - {away_team}", "1": f"{probs[0]:.1%}", "X": f"{probs[1]:.1%}", "2": f"{probs[2]:.1%}", "Tips": sign})
+                        match_probs_list.append(None)
+                        continue
+
+                    h_form_pts, h_form_gd, h_elo = (home_stats['HomeFormPts'], home_stats['HomeFormGD'], home_stats['HomeElo']) if home_stats['HomeTeam'] == home_team else (home_stats['AwayFormPts'], home_stats['AwayFormGD'], home_stats['AwayElo'])
+                    a_form_pts, a_form_gd, a_elo = (away_stats['HomeFormPts'], away_stats['HomeFormGD'], away_stats['HomeElo']) if away_stats['HomeTeam'] == away_team else (away_stats['AwayFormPts'], away_stats['AwayFormGD'], away_stats['AwayElo'])
+                    
+                    feature_vector = np.array([[h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo]])
+                    probs = model.predict_proba(feature_vector)[0]
+                    match_probs_list.append(probs)
+
+                guard_indices = pick_half_guards(match_probs_list, num_guards)
+                results = []
+
+                for i, (home_team, away_team) in enumerate(parsed_matches):
+                    probs = match_probs_list[i]
+                    sign = "Data saknas"
+                    
+                    if probs is not None:
+                        if i in guard_indices:
+                            sign = get_halfguard_sign(probs)
+                        else:
+                            prediction = np.argmax(probs)
+                            sign = ['1', 'X', '2'][prediction]
+                    
+                    results.append({
+                        "Match": f"{home_team} - {away_team}",
+                        "1": f"{probs[0]:.1%}" if probs is not None else "-",
+                        "X": f"{probs[1]:.1%}" if probs is not None else "-",
+                        "2": f"{probs[2]:.1%}" if probs is not None else "-",
+                        "Tips": sign
+                    })
                 
                 df_results = pd.DataFrame(results)
                 st.subheader("Resultat")
@@ -107,9 +132,7 @@ else:
                 tips_string = " ".join(df_results['Tips'].tolist())
                 st.code(tips_string, language=None)
 
-# ==============================================================================
-#  FELSÖKNINGSVERKTYG (Endast synligt för admin)
-# ==============================================================================
+# Felsökningsverktyget (kan vara kvar, dolt bakom URL-parameter)
 if st.query_params.get("debug") == "true":
     st.divider()
     with st.expander("DEBUG: Inspektera Lagnamn i Dataset", expanded=True):
