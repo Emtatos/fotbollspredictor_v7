@@ -117,7 +117,6 @@ else:
 
             if st.button("Tippa Matcher", type="primary", use_container_width=True):
                 match_probs_list = []
-                # NYTT: Lista för att spara feature-data för XAI
                 feature_details_list = []
 
                 for home_team, away_team in parsed_matches:
@@ -126,18 +125,13 @@ else:
 
                     if home_stats is None or away_stats is None:
                         match_probs_list.append(None)
-                        feature_details_list.append(None) # Lägg till None även här
+                        feature_details_list.append(None)
                         continue
                     
                     h_form_pts, h_form_gd, h_elo = (home_stats['HomeFormPts'], home_stats['HomeFormGD'], home_stats['HomeElo']) if home_stats['HomeTeam'] == home_team else (home_stats['AwayFormPts'], home_stats['AwayFormGD'], home_stats['AwayElo'])
                     a_form_pts, a_form_gd, a_elo = (away_stats['HomeFormPts'], away_stats['HomeFormGD'], away_stats['HomeElo']) if away_stats['HomeTeam'] == away_team else (away_stats['AwayFormPts'], away_stats['AwayFormGD'], away_stats['AwayElo'])
                     
-                    # NYTT: Spara feature-värdena för XAI
-                    feature_details_list.append({
-                        'elo_diff': h_elo - a_elo,
-                        'form_pts_diff': h_form_pts - a_form_pts
-                    })
-
+                    feature_details_list.append({'elo_diff': h_elo - a_elo, 'form_pts_diff': h_form_pts - a_form_pts})
                     feature_vector = np.array([[h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo]])
                     probs = model.predict_proba(feature_vector)[0]
                     match_probs_list.append(probs)
@@ -155,35 +149,44 @@ else:
                         else: sign = ['1', 'X', '2'][np.argmax(probs)]
                     
                     results.append({
-                        "Match": f"{home_team} - {away_team}",
-                        "1": f"{probs[0]:.1%}" if probs is not None else "-",
-                        "X": f"{probs[1]:.1%}" if probs is not None else "-",
-                        "2": f"{probs[2]:.1%}" if probs is not None else "-",
-                        "Tips": sign,
-                        # NYTT: Lägg till de råa skillnaderna i resultatet
-                        "elo_diff": details['elo_diff'] if details else 0,
+                        "Match": f"{home_team} - {away_team}", "1": f"{probs[0]:.1%}" if probs is not None else "-",
+                        "X": f"{probs[1]:.1%}" if probs is not None else "-", "2": f"{probs[2]:.1%}" if probs is not None else "-",
+                        "Tips": sign, "elo_diff": details['elo_diff'] if details else 0,
                         "form_pts_diff": details['form_pts_diff'] if details else 0
                     })
                 
                 df_results = pd.DataFrame(results)
                 
-                # NYTT: Formatera XAI-kolumnerna för snyggare visning
                 if not df_results.empty:
                     df_results['ELO-skillnad'] = df_results['elo_diff'].apply(lambda x: f"{x:+.0f}")
                     df_results['Form-skillnad (Poäng)'] = df_results['form_pts_diff'].apply(lambda x: f"{x:+.1f}")
 
                 st.subheader("Resultat")
-                # NYTT: Visa de nya kolumnerna i tabellen
                 st.dataframe(
                     df_results[['Match', 'Tips', '1', 'X', '2', 'ELO-skillnad', 'Form-skillnad (Poäng)']],
-                    use_container_width=True, 
-                    hide_index=True
+                    use_container_width=True, hide_index=True
                 )
                 
                 st.subheader("Tipsrad för kopiering")
                 tips_string = " ".join(df_results['Tips'].tolist())
                 st.code(tips_string, language=None)
 
-# Felsökningsverktyget (kan vara kvar, dolt bakom URL-parameter)
+# ==============================================================================
+#  FELSÖKNINGSVERKTYG (Endast synligt för admin)
+# ==============================================================================
 if st.query_params.get("debug") == "true":
-    # ... (kvarstår oförändrad)
+    st.divider()
+    with st.expander("DEBUG: Inspektera Lagnamn i Dataset", expanded=True):
+        if df_features is not None and not df_features.empty:
+            try:
+                unique_teams = pd.unique(df_features[['HomeTeam', 'AwayTeam']].values.ravel('K'))
+                sorted_teams = sorted([str(team) for team in unique_teams])
+                st.write(f"Hittade **{len(sorted_teams)}** unika lagnamn i `features.parquet`:")
+                selected_teams = st.multiselect("Sök bland lagnamn...", options=sorted_teams)
+                if selected_teams:
+                    st.write("Visar all data för valda lag:")
+                    st.dataframe(df_features[(df_features['HomeTeam'].isin(selected_teams)) | (df_features['AwayTeam'].isin(selected_teams))])
+            except Exception as e:
+                st.error(f"Kunde inte bearbeta lagnamn för felsökning: {e}")
+        else:
+            st.info("Datafilen (features.parquet) är inte laddad än.")
