@@ -1,12 +1,11 @@
 import re
 
-# Steg 1: Definiera kanoniska namn och alla deras kända alias i en dictionary.
-# Det kanoniska namnet (nyckeln) är den exakta strängen vi fann i vår datafil.
+# Steg 1: Definiera kanoniska namn (det fullständiga, korrekta namnet) och alla dess kända alias.
 TEAM_ALIASES = {
-    "Sheffield Wed": {
+    "Sheffield Wednesday": {
+        "Sheffield Weds", # <<< DEN FELANDE LÄNKEN!
         "Sheffield Wed", 
-        "Sheff Wed", 
-        "Sheffield Wednesday"
+        "Sheff Wed"
     },
     "Queens Park Rangers": {
         "QPR", 
@@ -27,15 +26,17 @@ TEAM_ALIASES = {
     "Leicester City": {"Leicester", "Leicester City"},
     "Norwich City": {"Norwich", "Norwich City"},
     "Stoke City": {"Stoke", "Stoke City"},
-    "Swansea City": {"Swansea", "Swansea City"}
+    "Swansea City": {"Swansea", "Swansea City"},
+    "Bradford City": {"Bradford", "Bradford C"},
+    "MK Dons": {"MK Dons"} # Kanoniska namnet kan vara ett alias till sig själv
 }
 
 # Steg 2: Skapa en "omvänd" dictionary för snabb uppslagning.
-# Den mappar varje alias till sitt kanoniska namn.
 ALIAS_TO_CANONICAL = {
     alias.lower(): canonical_name
     for canonical_name, aliases in TEAM_ALIASES.items()
-    for alias in aliases
+    # Lägg till det kanoniska namnet som ett alias till sig själv för fullständig robusthet
+    for alias in list(aliases) + [canonical_name]
 }
 
 def normalize_team_name(raw_name: str) -> str:
@@ -46,10 +47,6 @@ def normalize_team_name(raw_name: str) -> str:
     if not isinstance(raw_name, str):
         return raw_name
 
-    # Normalisera namnet genom att ta bort extra mellanslag och göra det till gemener
-    # Detta gör matchningen robust mot skiftlägesfel.
     normalized_key = " ".join(raw_name.strip().split()).lower()
     
-    # Hitta det kanoniska namnet i vår uppslags-dictionary.
-    # Om det inte finns, returnera det ursprungliga, rensade namnet.
     return ALIAS_TO_CANONICAL.get(normalized_key, raw_name.strip())
