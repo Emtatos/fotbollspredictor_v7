@@ -6,14 +6,9 @@ TEAM_ALIASES = {
     "Cardiff": "Cardiff City", "Cardiff C": "Cardiff City",
     "Man United": "Manchester United", "Man Utd": "Manchester United",
     "Man City": "Manchester City",
-    "Sheffield Wed": "Sheffield Wednesday", "Sheff Wed": "Sheffield Wednesday",
-    "Sheffield Utd": "Sheffield United", "Sheff Utd": "Sheffield United",
-    "QPR": "Queens Park Rangers",
     "MK Dons": "Milton Keynes Dons",
     "Wolves": "Wolverhampton Wanderers", "Wolverhampton": "Wolverhampton Wanderers",
     "Nott'm Forest": "Nottingham Forest", "Nottm Forest": "Nottingham Forest",
-
-    # NYA TILLÄGG för att hantera kortformer
     "Nottingham": "Nottingham Forest",
     "Birmingham": "Birmingham City",
     "Blackburn": "Blackburn Rovers",
@@ -22,7 +17,19 @@ TEAM_ALIASES = {
     "Leicester": "Leicester City",
     "Norwich": "Norwich City",
     "Stoke": "Stoke City",
-    "Swansea": "Swansea City"
+    "Swansea": "Swansea City",
+    
+    # KORRIGERING: Tvinga standardnamnet för problem-lagen
+    # Detta garanterar att oavsett om rådatan innehåller "Sheff Wed" eller "Sheffield Wednesday",
+    # blir resultatet i datafilen ALLTID "Sheffield Wednesday".
+    "Sheff Wed": "Sheffield Wednesday",
+    "Sheffield Wed": "Sheffield Wednesday",
+    
+    "QPR": "Queens Park Rangers",
+    "Queens Park Rangers": "Queens Park Rangers",
+    
+    "Sheff Utd": "Sheffield United",
+    "Sheffield Utd": "Sheffield United"
 }
 
 def normalize_team_name(raw_name: str) -> str:
@@ -30,9 +37,6 @@ def normalize_team_name(raw_name: str) -> str:
     # Säkerställ att input är en sträng
     name = str(raw_name).strip()
     
-    # Om en direkt matchning finns, använd den
-    if name in TEAM_ALIASES:
-        return TEAM_ALIASES[name]
-    
-    # Annars, returnera den ursprungliga strängen (eller en matchning om den finns, vilket är redundant men ofarligt)
+    # Returnera alias om det finns, annars returnera det ursprungliga namnet.
+    # .get() är perfekt för detta.
     return TEAM_ALIASES.get(name, name)
