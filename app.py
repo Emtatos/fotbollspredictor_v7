@@ -1,16 +1,14 @@
-# app.py
-
-import pandas as pd
-import numpy as np
-from ui_utils import parse_match_input
 import streamlit as st
 from pathlib import Path
 import logging
+import pandas as pd
+import numpy as np
 
 # Importera nödvändiga funktioner från våra moduler
 from main import run_pipeline, get_current_season_code
 from model_handler import load_model
 from xgboost import XGBClassifier
+from ui_utils import parse_match_input
 
 # Sätt upp sidans konfiguration och titel
 st.set_page_config(page_title="Fotbollsmodellen V7", layout="wide")
@@ -25,7 +23,6 @@ logger = logging.getLogger(__name__)
 def load_cached_model(model_path: Path) -> XGBClassifier | None:
     """
     En wrapper-funktion för att ladda modellen som kan cachas av Streamlit.
-    Cache-nyckeln baseras på funktionen och dess argument (dvs. model_path).
     """
     if not model_path.exists():
         st.error(f"Modellfilen hittades inte på sökvägen: {model_path}")
@@ -60,35 +57,34 @@ with st.sidebar:
                 run_pipeline()
                 st.success("Pipelinen är färdig! Modellen har tränats om.")
                 st.info("Appen laddas om för att använda den nya modellen...")
+                # Rensa alla cachar för att tvinga omladdning av både modell och data
                 st.cache_resource.clear()
+                st.cache_data.clear()
                 st.rerun()
             except Exception as e:
                 st.error(f"Ett fel inträffade i pipelinen: {e}")
-# --- Huvud-gränssnitt ---
 
+# --- Huvud-gränssnitt ---
 st.header("Prediktera Matcher")
 
-@st.cache_data(show_spinner="Laddar historisk data (features)...")
+@st.cache_data(show_spinner="Laddar historisk data för lag...")
 def load_feature_data(path: Path) -> pd.DataFrame | None:
     """Laddar och cachar den sparade filen med features."""
     if not path.exists():
         return None
     try:
-        df = pd.read_parquet(path)
-        # Säkerställ sortering efter datum om inte redan
-        if "Date" in df.columns:
-            df = df.sort_values("Date").reset_index(drop=True)
-        return df
+        return pd.read_parquet(path)
     except Exception as e:
         st.error(f"Kunde inte ladda feature-data: {e}")
         return None
 
 def get_team_snapshot(team_name: str, df_features: pd.DataFrame) -> pd.Series | None:
-    """Hämtar den senaste raden (oavsett hemma/borta) för ett lag."""
+    """Hämtar den senaste raden med statistik för ett specifikt lag."""
     team_matches = df_features[(df_features['HomeTeam'] == team_name) | (df_features['AwayTeam'] == team_name)]
     if team_matches.empty:
         return None
-    return team_matches.iloc[-1]  # senaste
+    return team_matches.iloc[-1]
+
 
 if not model:
     st.info("Träna en modell med knappen i sidomenyn för att kunna göra prediktioner.")
@@ -96,79 +92,104 @@ else:
     features_path = Path("data") / "features.parquet"
     df_features = load_feature_data(features_path)
 
-    if df_features is None or df_features.empty:
-        st.warning("Feature-data (`data/features.parquet`) saknas. Kör omträning i sidomenyn för att skapa filen.")
+    if df_features is None:
+        st.warning("Feature-data (`features.parquet`) saknas. Kör en omträning för att skapa filen.")
     else:
         st.subheader("Mata in din tipsrad")
         default_matches = (
-            "Arsenal - Aston Villa\n"
-            "Bournemouth - Man United\n"
-            "Liverpool - Crystal Palace\n"
-            "Man City - Luton\n"
-            "West Ham - Fulham\n"
-            "Coventry - Birmingham\n"
-            "Middlesbrough - Leeds\n"
-            "Norwich - Bristol City\n"
-            "Stoke - Plymouth\n"
-            "Sunderland - Millwall\n"
-            "West Brom - Leicester\n"
-            "Bolton - Portsmouth\n"
-            "Derby - Leyton Orient"
+            "Crystal Palace - Liverpool\n"
+            "Manchester City - Burnley\n"
+            "Leeds - Bournemouth\n"
+            "Charlton - Blackburn\n"
+            "Oxford - Sheffield United\n"
+            "Preston - Bristol City\n"
+            "Sheffield Wednesday - Queens Park Rangers\n"
+            "Southampton - Middlesbrough\n"
+            "Stoke City - Norwich City\n"
+            "Watford - Hull"
         )
-
         match_input = st.text_area(
-            "Klistra in dina matcher, en per rad (t.ex. 'Arsenal - Chelsea').",
+            "Klistra in dina matcher, en per rad (t.ex. 'Heerenveen - Heracles').",
             value=default_matches,
-            height=280
+            height=300
         )
 
         if st.button("Tippa Matcher", type="primary", use_container_width=True):
             parsed_matches = parse_match_input(match_input)
-
+            
             if not parsed_matches:
-                st.error("Kunde inte tolka några matcher. Kontrollera att du använder t.ex. 'Lag A - Lag B'.")
+                st.error("Kunde inte tolka några matcher. Kontrollera formatet.")
             else:
-                rows = []
-                tips = []
+                results = []
                 for home_team, away_team in parsed_matches:
-                    hs = get_team_snapshot(home_team, df_features)
-                    as_ = get_team_snapshot(away_team, df_features)
+                    home_stats = get_team_snapshot(home_team, df_features)
+                    away_stats = get_team_snapshot(away_team, df_features)
 
-                    if hs is None or as_ is None:
-                        rows.append({
-                            "Match": f"{home_team} - {away_team}",
-                            "1": "-", "X": "-", "2": "-",
-                            "Tips": "Data saknas"
+                    if home_stats is None or away_stats is None:
+                        results.append({
+                            "Match": f"{home_team} - {away_team}", "1": "-", "X": "-", "2": "-",
+                            "Tips": "Data saknas", "Sannolikhet": 0
                         })
-                        tips.append("(X)")
                         continue
 
-                    # Plocka form/elo utifrån om laget var hemma eller borta i sin senaste rad
-                    h_form_pts = hs['HomeFormPts'] if hs['HomeTeam'] == home_team else hs['AwayFormPts']
-                    h_form_gd  = hs['HomeFormGD'] if hs['HomeTeam'] == home_team else hs['AwayFormGD']
-                    h_elo      = hs['HomeElo']     if hs['HomeTeam'] == home_team else hs['AwayElo']
+                    h_form_pts = home_stats['HomeFormPts'] if home_stats['HomeTeam'] == home_team else home_stats['AwayFormPts']
+                    h_form_gd = home_stats['HomeFormGD'] if home_stats['HomeTeam'] == home_team else home_stats['AwayFormGD']
+                    h_elo = home_stats['HomeElo'] if home_stats['HomeTeam'] == home_team else home_stats['AwayElo']
+                    
+                    a_form_pts = away_stats['HomeFormPts'] if away_stats['HomeTeam'] == away_team else away_stats['AwayFormPts']
+                    a_form_gd = away_stats['HomeFormGD'] if away_stats['HomeTeam'] == away_team else away_stats['AwayFormGD']
+                    a_elo = away_stats['AwayElo'] if away_stats['AwayTeam'] == away_team else away_stats['HomeElo']
 
-                    a_form_pts = as_['HomeFormPts'] if as_['HomeTeam'] == away_team else as_['AwayFormPts']
-                    a_form_gd  = as_['HomeFormGD'] if as_['HomeTeam'] == away_team else as_['AwayFormGD']
-                    a_elo      = as_['AwayElo']     if as_['AwayTeam'] == away_team else as_['HomeElo']
+                    feature_vector = np.array([[
+                        h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo
+                    ]])
 
-                    X = np.array([[h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo]])
-                    probs = model.predict_proba(X)[0]
-                    pred_idx = int(np.argmax(probs))
-                    sign = ['1', 'X', '2'][pred_idx]
-
-                    rows.append({
-                        "Match": f"{home_team} - {away_team}",
-                        "1": f"{probs[0]:.1%}",
-                        "X": f"{probs[1]:.1%}",
-                        "2": f"{probs[2]:.1%}",
-                        "Tips": sign
+                    probs = model.predict_proba(feature_vector)[0]
+                    prediction = np.argmax(probs)
+                    sign = ['1', 'X', '2'][prediction]
+                    
+                    results.append({
+                        "Match": f"{home_team} - {away_team}", "1": f"{probs[0]:.1%}",
+                        "X": f"{probs[1]:.1%}", "2": f"{probs[2]:.1%}",
+                        "Tips": sign, "Sannolikhet": probs[prediction]
                     })
-                    tips.append(f"({sign})")
-
-                df_out = pd.DataFrame(rows)
+                
+                df_results = pd.DataFrame(results)
+                
                 st.subheader("Resultat")
-                st.dataframe(df_out[['Match', '1', 'X', '2', 'Tips']], use_container_width=True, hide_index=True)
-
+                st.dataframe(df_results[['Match', '1', 'X', '2', 'Tips']], use_container_width=True, hide_index=True)
+                
                 st.subheader("Tipsrad för kopiering")
-                st.code(" ".join(tips), language=None)
+                tips_string = " ".join(df_results['Tips'].tolist())
+                st.code(tips_string, language=None)
+
+# ==============================================================================
+#  FELSÖKNINGSVERKTYG
+# ==============================================================================
+st.divider()
+with st.expander("DEBUG: Inspektera Lagnamn i Dataset"):
+    # Använd en sessions-state-variabel för att säkerställa att df_features finns tillgänglig
+    if df_features is not None and not df_features.empty:
+        try:
+            # Samla unika lagnamn från både hemma- och bortalagskolumnerna
+            unique_teams = pd.unique(df_features[['HomeTeam', 'AwayTeam']].values.ravel('K'))
+            sorted_teams = sorted([str(team) for team in unique_teams])
+
+            st.write(f"Hittade **{len(sorted_teams)}** unika lagnamn i `features.parquet`:")
+            
+            # Visa en sökbar lista över alla lagnamn
+            selected_teams = st.multiselect(
+                "Sök bland lagnamn i den bearbetade datan för att verifiera stavning:",
+                options=sorted_teams
+            )
+            
+            if selected_teams:
+                st.write("Visar all data för valda lag:")
+                st.dataframe(df_features[(df_features['HomeTeam'].isin(selected_teams)) | (df_features['AwayTeam'].isin(selected_teams))])
+
+        except Exception as e:
+            st.error(f"Kunde inte bearbeta lagnamn för felsökning: {e}")
+    elif 'model' in locals() and model:
+        st.warning("Feature-data (`df_features`) har inte laddats, kan inte visa lagnamn.")
+    else:
+        st.info("Modellen måste vara laddad för att kunna inspektera datan.")
