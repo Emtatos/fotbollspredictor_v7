@@ -25,7 +25,7 @@ def load_cached_model(model_path: Path) -> XGBClassifier | None:
     En wrapper-funktion för att ladda modellen som kan cachas av Streamlit.
     """
     if not model_path.exists():
-        st.error(f"Modellfilen hittades inte på sökvägen: {model_path}")
+        # Detta är inte ett fel, utan ett normalt tillstånd vid första körning
         return None
     model = load_model(model_path)
     return model
@@ -44,7 +44,9 @@ with st.sidebar:
     if model:
         st.success(f"Modell laddad: `{MODEL_FILENAME}`")
     else:
-        st.warning("Ingen modell laddad. Träna modellen för att börja.")
+        st.warning(f"Ingen modell laddad. Träna modellen för att börja.")
+        st.info(f"Appen letade efter: `{model_path}`")
+
 
     st.divider()
     st.header("Åtgärder")
@@ -64,9 +66,7 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Ett fel inträffade i pipelinen: {e}")
 
-# --- Huvud-gränssnitt ---
-st.header("Prediktera Matcher")
-
+# --- Data-laddning och Huvud-gränssnitt ---
 @st.cache_data(show_spinner="Laddar historisk data för lag...")
 def load_feature_data(path: Path) -> pd.DataFrame | None:
     """Laddar och cachar den sparade filen med features."""
@@ -85,6 +85,10 @@ def get_team_snapshot(team_name: str, df_features: pd.DataFrame) -> pd.Series | 
         return None
     return team_matches.iloc[-1]
 
+# **KORRIGERINGEN:** Initiera df_features till None för att garantera att variabeln alltid finns
+df_features = None
+
+st.header("Prediktera Matcher")
 
 if not model:
     st.info("Träna en modell med knappen i sidomenyn för att kunna göra prediktioner.")
@@ -168,16 +172,13 @@ else:
 # ==============================================================================
 st.divider()
 with st.expander("DEBUG: Inspektera Lagnamn i Dataset"):
-    # Använd en sessions-state-variabel för att säkerställa att df_features finns tillgänglig
     if df_features is not None and not df_features.empty:
         try:
-            # Samla unika lagnamn från både hemma- och bortalagskolumnerna
             unique_teams = pd.unique(df_features[['HomeTeam', 'AwayTeam']].values.ravel('K'))
             sorted_teams = sorted([str(team) for team in unique_teams])
 
             st.write(f"Hittade **{len(sorted_teams)}** unika lagnamn i `features.parquet`:")
             
-            # Visa en sökbar lista över alla lagnamn
             selected_teams = st.multiselect(
                 "Sök bland lagnamn i den bearbetade datan för att verifiera stavning:",
                 options=sorted_teams
@@ -189,7 +190,5 @@ with st.expander("DEBUG: Inspektera Lagnamn i Dataset"):
 
         except Exception as e:
             st.error(f"Kunde inte bearbeta lagnamn för felsökning: {e}")
-    elif 'model' in locals() and model:
-        st.warning("Feature-data (`df_features`) har inte laddats, kan inte visa lagnamn.")
     else:
-        st.info("Modellen måste vara laddad för att kunna inspektera datan.")
+        st.info("Datafilen (features.parquet) är inte laddad. Kör pipelinen eller se till att filen finns.")
