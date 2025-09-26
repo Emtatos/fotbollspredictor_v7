@@ -66,15 +66,17 @@ def run_pipeline():
         logger.error("Kunde inte skapa features. Avbryter pipeline.")
         return
     logger.info("Skapade features. DataFrame har nu %d kolumner.", len(df_features.columns))
-# --- 4b. Spara features för appen ---
-try:
-    features_path = Path("data") / "features.parquet"
-    features_path.parent.mkdir(parents=True, exist_ok=True)
-    df_features.to_parquet(features_path)
-    logger.info("Funktionsdata har sparats till: %s", features_path)
-except Exception as e:
-    logger.error("Kunde inte spara funktionsdata: %s", e)
-    return  # Avbryt om vi inte kan spara denna kritiska fil
+
+    # --- 4b. Spara features för appen ---
+    try:
+        features_path = Path("data") / "features.parquet"
+        features_path.parent.mkdir(parents=True, exist_ok=True)
+        df_features.to_parquet(features_path)
+        logger.info("Funktionsdata har sparats till: %s", features_path)
+    except Exception as e:
+        logger.error("Kunde inte spara funktionsdata: %s", e)
+        return  # Avbryt om vi inte kan spara denna kritiska fil
+
     # --- 5. Träna och spara modell ---
     logger.info("--- Steg 4: Tränar och sparar modell ---")
     trained_model = train_and_save_model(df_features=df_features, model_path=model_path)
@@ -82,7 +84,7 @@ except Exception as e:
         logger.error("Modellträningen misslyckades. Avbryter pipeline.")
         return
     logger.info("Modellen har tränats och sparats framgångsrikt.")
-    
+
     # --- 6. Verifiera laddning av modell (valfritt test) ---
     logger.info("--- Steg 5: Verifierar att modellen kan laddas ---")
     loaded_model = load_model(model_path=model_path)
