@@ -64,15 +64,111 @@ with st.sidebar:
                 st.rerun()
             except Exception as e:
                 st.error(f"Ett fel inträffade i pipelinen: {e}")
-
 # --- Huvud-gränssnitt ---
+
 st.header("Prediktera Matcher")
+
+@st.cache_data(show_spinner="Laddar historisk data (features)...")
+def load_feature_data(path: Path) -> pd.DataFrame | None:
+    """Laddar och cachar den sparade filen med features."""
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path)
+        # Säkerställ sortering efter datum om inte redan
+        if "Date" in df.columns:
+            df = df.sort_values("Date").reset_index(drop=True)
+        return df
+    except Exception as e:
+        st.error(f"Kunde inte ladda feature-data: {e}")
+        return None
+
+def get_team_snapshot(team_name: str, df_features: pd.DataFrame) -> pd.Series | None:
+    """Hämtar den senaste raden (oavsett hemma/borta) för ett lag."""
+    team_matches = df_features[(df_features['HomeTeam'] == team_name) | (df_features['AwayTeam'] == team_name)]
+    if team_matches.empty:
+        return None
+    return team_matches.iloc[-1]  # senaste
+
 if not model:
     st.info("Träna en modell med knappen i sidomenyn för att kunna göra prediktioner.")
 else:
-    st.markdown("Modellen är redo! Nästa steg är att bygga inmatning och resultattabell här.")
-    # TODO:
-    # 1) Text-area för att klistra in matcher.
-    # 2) Knapp för att starta prediktion.
-    # 3) Tabell för att visa resultat.
-    # 4) (Ev.) XAI/feature-importance.
+    features_path = Path("data") / "features.parquet"
+    df_features = load_feature_data(features_path)
+
+    if df_features is None or df_features.empty:
+        st.warning("Feature-data (`data/features.parquet`) saknas. Kör omträning i sidomenyn för att skapa filen.")
+    else:
+        st.subheader("Mata in din tipsrad")
+        default_matches = (
+            "Arsenal - Aston Villa\n"
+            "Bournemouth - Man United\n"
+            "Liverpool - Crystal Palace\n"
+            "Man City - Luton\n"
+            "West Ham - Fulham\n"
+            "Coventry - Birmingham\n"
+            "Middlesbrough - Leeds\n"
+            "Norwich - Bristol City\n"
+            "Stoke - Plymouth\n"
+            "Sunderland - Millwall\n"
+            "West Brom - Leicester\n"
+            "Bolton - Portsmouth\n"
+            "Derby - Leyton Orient"
+        )
+
+        match_input = st.text_area(
+            "Klistra in dina matcher, en per rad (t.ex. 'Arsenal - Chelsea').",
+            value=default_matches,
+            height=280
+        )
+
+        if st.button("Tippa Matcher", type="primary", use_container_width=True):
+            parsed_matches = parse_match_input(match_input)
+
+            if not parsed_matches:
+                st.error("Kunde inte tolka några matcher. Kontrollera att du använder t.ex. 'Lag A - Lag B'.")
+            else:
+                rows = []
+                tips = []
+                for home_team, away_team in parsed_matches:
+                    hs = get_team_snapshot(home_team, df_features)
+                    as_ = get_team_snapshot(away_team, df_features)
+
+                    if hs is None or as_ is None:
+                        rows.append({
+                            "Match": f"{home_team} - {away_team}",
+                            "1": "-", "X": "-", "2": "-",
+                            "Tips": "Data saknas"
+                        })
+                        tips.append("(X)")
+                        continue
+
+                    # Plocka form/elo utifrån om laget var hemma eller borta i sin senaste rad
+                    h_form_pts = hs['HomeFormPts'] if hs['HomeTeam'] == home_team else hs['AwayFormPts']
+                    h_form_gd  = hs['HomeFormGD'] if hs['HomeTeam'] == home_team else hs['AwayFormGD']
+                    h_elo      = hs['HomeElo']     if hs['HomeTeam'] == home_team else hs['AwayElo']
+
+                    a_form_pts = as_['HomeFormPts'] if as_['HomeTeam'] == away_team else as_['AwayFormPts']
+                    a_form_gd  = as_['HomeFormGD'] if as_['HomeTeam'] == away_team else as_['AwayFormGD']
+                    a_elo      = as_['AwayElo']     if as_['AwayTeam'] == away_team else as_['HomeElo']
+
+                    X = np.array([[h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo]])
+                    probs = model.predict_proba(X)[0]
+                    pred_idx = int(np.argmax(probs))
+                    sign = ['1', 'X', '2'][pred_idx]
+
+                    rows.append({
+                        "Match": f"{home_team} - {away_team}",
+                        "1": f"{probs[0]:.1%}",
+                        "X": f"{probs[1]:.1%}",
+                        "2": f"{probs[2]:.1%}",
+                        "Tips": sign
+                    })
+                    tips.append(f"({sign})")
+
+                df_out = pd.DataFrame(rows)
+                st.subheader("Resultat")
+                st.dataframe(df_out[['Match', '1', 'X', '2', 'Tips']], use_container_width=True, hide_index=True)
+
+                st.subheader("Tipsrad för kopiering")
+                st.code(" ".join(tips), language=None)
