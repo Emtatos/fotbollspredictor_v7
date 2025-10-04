@@ -704,38 +704,37 @@ if st.button("Tippa matcher", use_container_width=True):
 # --- välj tecken + procent (singel/halvgardering) ---
 probs3 = _extract_probs_generic(probs) if probs is not None else None
 
-if (probs3 is None) or (len(probs3) == 0) or (float(np.sum(probs3)) == 0.0):
+# --- välj tecken + procent (singel/halvgardering) ---
+probs3 = _extract_probs_generic(probs) if probs is not None else None
+
+if (probs3 is None) or (len(probs3) != 3) or (float(np.sum(probs3)) == 0.0):
     # saknar sannolikheter → visa tecken utan %
-    sign_display, pct = "(X)", "-"
-    tecken_list.append("(X)")
+    if idx in half_idxs:
+        sign_display = f"({_halfguard_sign(probs)})"   # (1X)/(12)/(X2)
+        tecken_list.append(sign_display)
+    else:
+        sign_display = "(X)"
+        tecken_list.append(sign_display)
+    pct = "-"
 else:
     if idx in half_idxs:
         # halvgardering → summera två utfall
         hg = _halfguard_sign(probs)   # "1X", "12" eller "X2"
         sign_display = f"({hg})"
         p1, px, p2 = probs3
-        if     hg == "1X": p = p1 + px
-        elif   hg == "12": p = p1 + p2
-        else:              p = px + p2  # "X2"
+        if   hg == "1X": p = p1 + px
+        elif hg == "12": p = p1 + p2
+        else:            p = px + p2   # "X2"
         pct = f"{p*100:.1f}%"
         tecken_list.append(sign_display)
     else:
         # singeltecken
         pred = int(np.argmax(probs3))
         sign = ['1','X','2'][pred]
-        sign_display, pct = f"({sign})", f"{probs3[pred]*100:.1f}%"
-        tecken_list.append(f"({sign})")
+        sign_display = f"({sign})"
+        pct = f"{probs3[pred]*100:.1f}%"
+        tecken_list.append(sign_display)
 
-else:
-    if probs3 is None:
-        # saknar data → behåll tecken men utan procent
-        sign_display, pct = "(X)", "-"
-        tecken_list.append("(X)")
-    else:
-        pred = int(np.argmax(probs3))
-        sign = ['1','X','2'][pred]
-        sign_display, pct = f"({sign})", f"{probs3[pred]*100:.1f}%"
-        tecken_list.append(f"({sign})")
 
             # Stats: ELOΔ
             _, _, _, _, _, _, _, helo, aelo = meta
