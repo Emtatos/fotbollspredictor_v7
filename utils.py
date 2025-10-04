@@ -28,6 +28,11 @@ TEAM_ALIASES = {
     "Stoke City": {"Stoke", "Stoke City"},
     "Swansea City": {"Swansea", "Swansea City"},
     "Bradford City": {"Bradford", "Bradford C"},
+    "Millwall": {"Millwall"},"West Bromwich Albion": {
+    "West Brom",
+    "West Bromwich",
+    "West Bromwich Albion"
+},
     "MK Dons": {"MK Dons"} # Kanoniska namnet kan vara ett alias till sig själv
 }
 
