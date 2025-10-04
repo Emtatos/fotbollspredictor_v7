@@ -720,11 +720,10 @@ if st.button("Tippa matcher", use_container_width=True):
 
         rows.append([idx, f"{home_label} - {away_label}", sign_display, pct, elo_delta])
         
-        df_out = pd.DataFrame(rows, columns=["Matchnr", "Match", "Tecken", "%", "ELOΔ"])
-        st.subheader("Resultat-tabell")
-        st.table(df_out)
-
-
+    # ===== Rendera tabellen (en gång efter loopen) =====
+    df_out = pd.DataFrame(rows, columns=["Matchnr", "Match", "Tecken", "%", "ELOΔ"])
+    st.subheader("Resultat-tabell")
+    st.dataframe(df_out, hide_index=True, use_container_width=True, height=(len(df_out)+1)*36)
 
     st.subheader("Tipsrad (kopiera)")
     st.code(" ".join(tecken_list), language=None)
