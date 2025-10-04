@@ -701,28 +701,31 @@ if st.button("Tippa matcher", use_container_width=True):
         probs = match_probs[idx - 1]
         meta = match_meta[idx - 1]
 
-        if (probs is None) or (len(probs) != 3) or float(np.sum(probs)) == 0.0:
-            sign_display, pct, elo_delta = "(X)", "", ""
-            tecken_list.append("(X)")
-        else:
-            # Gör om till (p1, px, p2) oavsett format
+# --- välj tecken + procent (singel/halvgardering) ---
 probs3 = _extract_probs_generic(probs) if probs is not None else None
 
-if idx in half_idxs:
-    hg = _halfguard_sign(probs)        # "1X", "12" eller "X2"
-    sign_display = f"({hg})"
-    if probs3 is None:
-        pct = "-"
-    else:
+if (probs3 is None) or (len(probs3) == 0) or (float(np.sum(probs3)) == 0.0):
+    # saknar sannolikheter → visa tecken utan %
+    sign_display, pct = "(X)", "-"
+    tecken_list.append("(X)")
+else:
+    if idx in half_idxs:
+        # halvgardering → summera två utfall
+        hg = _halfguard_sign(probs)   # "1X", "12" eller "X2"
+        sign_display = f"({hg})"
         p1, px, p2 = probs3
-        if hg == "1X":
-            p = p1 + px
-        elif hg == "12":
-            p = p1 + p2
-        else:  # "X2"
-            p = px + p2
+        if     hg == "1X": p = p1 + px
+        elif   hg == "12": p = p1 + p2
+        else:              p = px + p2  # "X2"
         pct = f"{p*100:.1f}%"
-    tecken_list.append(sign_display)
+        tecken_list.append(sign_display)
+    else:
+        # singeltecken
+        pred = int(np.argmax(probs3))
+        sign = ['1','X','2'][pred]
+        sign_display, pct = f"({sign})", f"{probs3[pred]*100:.1f}%"
+        tecken_list.append(f"({sign})")
+
 else:
     if probs3 is None:
         # saknar data → behåll tecken men utan procent
