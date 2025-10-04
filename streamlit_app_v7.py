@@ -30,6 +30,7 @@ import streamlit as st
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
+# Viktigt: en enda normaliserare i hela appen
 from utils import normalize_team_name, set_canonical_teams
 
 
@@ -46,7 +47,7 @@ except Exception:
 st.set_page_config(page_title="Fotboll v7 — E0–E2 + Fredagsanalys", layout="wide")
 st.title("⚽ Fotboll v7 — Tippa matcher (E0–E2) + halvgarderingar + Fredagsanalys")
 
-# Viktigt: separata mappar/filnamn för v7 (krockar inte med v6)
+# Separata mappar/filnamn för v7
 DATA_DIR = "data_v7"
 MODEL_DIR = "models_v7"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -81,17 +82,8 @@ def _unify_dash(s: str) -> str:
     # Tolka – (en-dash), — (em-dash) och − (minus) som bindestreck
     return re.sub(r"[–—−]", "-", s)
 
-# *** Viktigt ***
-# All namnnormlisering hämtas nu från utils.normalize_team_name
-# så att alla ställen i appen använder SAMMA logik/alias.
-
-
 def _safe_secret(key: str) -> Optional[str]:
-    """
-    SÄKER hemlighetshämtning.
-    - Försök env först (Render/Heroku m.fl.)
-    - Försök st.secrets endast om det finns och är laddat; använd 'in' för att undvika parse-fel.
-    """
+    """Säker hemlighets-hämtning (env först, sen st.secrets om det finns)."""
     val = os.getenv(key)
     if val:
         return val
@@ -168,6 +160,7 @@ def load_all_data(files: Tuple[str, ...]) -> pd.DataFrame:
             for col in ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"]:
                 if col not in df.columns:
                     df[col] = np.nan
+            # Normalisering (samma logik överallt)
             df["HomeTeam"] = df["HomeTeam"].astype(str).apply(normalize_team_name)
             df["AwayTeam"] = df["AwayTeam"].astype(str).apply(normalize_team_name)
             dfs.append(df)
@@ -450,9 +443,10 @@ def _extract_probs_generic(p) -> List[float]:
         pa = get_any(p, ('2','A','away','Away','AWAY'))
         probs = [ph, px, pa]
     else:
-        probs = list(p)
+        probs = list(p) if p is not None else []
 
     probs = [max(1e-12, float(x)) for x in probs[:3]]
+    # Normalisera till 1
     s = sum(probs)
     if s <= 0:
         probs = [1/3, 1/3, 1/3]
@@ -494,7 +488,7 @@ def _halfguard_sign(probs_like) -> str:
     return "".join(keep)
 
 # =======================
-#   UI – sidomeny
+#   UI – sidomeny + data
 # =======================
 with st.sidebar:
     st.header("Status")
@@ -505,7 +499,6 @@ df_raw = load_all_data(files)
 
 # Låt normaliseraren veta vilka lagnamn som faktiskt finns i datat
 try:
-    from utils import set_canonical_teams
     canon = set(df_raw["HomeTeam"].dropna().astype(str)) | set(df_raw["AwayTeam"].dropna().astype(str))
     set_canonical_teams(canon)
 except Exception:
@@ -607,13 +600,12 @@ if st.button("↻ Ladda om CSV-filer", use_container_width=True,
 #   Huvud – inputs
 # =======================
 n_matches = st.number_input("Antal matcher att tippa", min_value=1, max_value=13, value=13, step=1)
-# default 0 halvgarderingar
 n_half = st.number_input("Antal halvgarderingar", min_value=0, max_value=int(n_matches), value=0, step=1)
 
 st.markdown("### Förifyll tipsrad (manuellt)")
-st.caption('Klistra in **13 rader** (valfri liga tillåten). Format-exempel:'
-           '\n`Arsenal - Everton` eller `Arsenal (E0) - Everton (E0)` eller `AIK - Hammarby`.'
-           '\nOm en match saknar data i E0–E2 används GPT-fallback (om nyckel finns).')
+st.caption('Klistra in **13 rader** (valfri liga tillåten). Format-exempel: '
+           '`Arsenal - Everton` eller `Arsenal (E0) - Everton (E0)`.'
+           ' Om en match saknar data i E0–E2 används GPT-fallback (om nyckel finns).')
 
 default_13 = (
     "Fulham - Brentford\n"
@@ -639,7 +631,7 @@ else:
     st.info(f"Upptäckte {len(manual_pairs)} manuella rader (av {n_matches}). Tomma/felaktiga rader ignoreras.")
 
 # =======================
-#   Snapshot-hjälpare (v6.8 nya)
+#   Snapshot-hjälpare
 # =======================
 def _team_snapshot(df_feat: pd.DataFrame, team: str, league_hint: Optional[str]) -> Optional[Tuple[float, float, float, str]]:
     """
@@ -664,16 +656,17 @@ def _team_snapshot(df_feat: pd.DataFrame, team: str, league_hint: Optional[str])
 #   Körning
 # =======================
 if st.button("Tippa matcher", use_container_width=True):
-    rows = []
+    rows: List[List[object]] = []
     match_probs: List[Optional[np.ndarray]] = []
     tecken_list: List[str] = []
-    match_meta = []  # (home, away, league_used, hfp, hfgd, afp, afgd, helo, aelo)
+    match_meta: List[Tuple[str, str, str, float, float, float, float, float, float]] = []  # (home, away, lg, hfp, hfgd, afp, afgd, helo, aelo)
 
     if len(manual_pairs) == int(n_matches):
         pairs_to_use = manual_pairs
     else:
         pairs_to_use = []  # användaren får korrigera texten
 
+    # Bygg sannolikheter + metadata
     for (home, away, lg_hint) in pairs_to_use:
         hs = _team_snapshot(df_prep, home, lg_hint)
         as_ = _team_snapshot(df_prep, away, lg_hint)
@@ -692,56 +685,50 @@ if st.button("Tippa matcher", use_container_width=True):
         match_probs.append(probs)
         match_meta.append((home, away, used_lg, hfp, hfgd, afp, afgd, helo, aelo))
 
-    # Halvgarderingar
+    # Välj halvgarderingar (index 0-baserade)
     half_idxs = _pick_half_guards(match_probs, int(n_half))
 
     # Tabell + tipsrad
     for idx in range(1, len(pairs_to_use) + 1):
         home_label, away_label, _ = pairs_to_use[idx - 1]
-        probs = match_probs[idx - 1]
+        probs_like = match_probs[idx - 1]
         meta = match_meta[idx - 1]
 
-# --- välj tecken + procent (singel/halvgardering) ---
-probs3 = _extract_probs_generic(probs) if probs is not None else None
+        # --- välj tecken + procent (singel/halvgardering) ---
+        probs3 = _extract_probs_generic(probs_like) if probs_like is not None else None
 
-# --- välj tecken + procent (singel/halvgardering) ---
-probs3 = _extract_probs_generic(probs) if probs is not None else None
+        if (probs3 is None) or (len(probs3) != 3) or (float(np.sum(probs3)) == 0.0):
+            # saknar sannolikheter → visa tecken utan %
+            if (idx - 1) in half_idxs:
+                sign_display = f"({_halfguard_sign(probs_like)})"   # (1X)/(12)/(X2)
+            else:
+                sign_display = "(X)"
+            pct = "-"
+        else:
+            if (idx - 1) in half_idxs:
+                # halvgardering → summera två utfall
+                hg = _halfguard_sign(probs_like)   # "1X", "12" eller "X2"
+                p1, px, p2 = probs3
+                if   hg == "1X": p = p1 + px
+                elif hg == "12": p = p1 + p2
+                else:            p = px + p2   # "X2"
+                sign_display = f"({hg})"
+                pct = f"{p*100:.1f}%"
+            else:
+                # singeltecken
+                pred = int(np.argmax(probs3))
+                sign = ['1','X','2'][pred]
+                sign_display = f"({sign})"
+                pct = f"{probs3[pred]*100:.1f}%"
 
-if (probs3 is None) or (len(probs3) != 3) or (float(np.sum(probs3)) == 0.0):
-    # saknar sannolikheter → visa tecken utan %
-    if idx in half_idxs:
-        sign_display = f"({_halfguard_sign(probs)})"   # (1X)/(12)/(X2)
-        tecken_list.append(sign_display)
-    else:
-        sign_display = "(X)"
-        tecken_list.append(sign_display)
-    pct = "-"
-else:
-    if idx in half_idxs:
-        # halvgardering → summera två utfall
-        hg = _halfguard_sign(probs)   # "1X", "12" eller "X2"
-        sign_display = f"({hg})"
-        p1, px, p2 = probs3
-        if   hg == "1X": p = p1 + px
-        elif hg == "12": p = p1 + p2
-        else:            p = px + p2   # "X2"
-        pct = f"{p*100:.1f}%"
-        tecken_list.append(sign_display)
-    else:
-        # singeltecken
-        pred = int(np.argmax(probs3))
-        sign = ['1','X','2'][pred]
-        sign_display = f"({sign})"
-        pct = f"{probs3[pred]*100:.1f}%"
         tecken_list.append(sign_display)
 
-
-            # Stats: ELOΔ
-            _, _, _, _, _, _, _, helo, aelo = meta
-            elo_delta = f"{helo - aelo:+.0f}"
+        # Stats: ELOΔ
+        _, _, _, _, _, _, _, helo, aelo = meta
+        elo_delta = f"{helo - aelo:+.0f}"
 
         rows.append([idx, f"{home_label} - {away_label}", sign_display, pct, elo_delta])
-        
+
     # ===== Rendera tabellen (en gång efter loopen) =====
     df_out = pd.DataFrame(rows, columns=["Matchnr", "Match", "Tecken", "%", "ELOΔ"])
     st.subheader("Resultat-tabell")
@@ -759,7 +746,7 @@ else:
             st.caption("Analysen bygger endast på form/ELO/sannolikheter (inga nyheter för att undvika påhitt).")
             for i, (home_team, away_team, lg, hfp, hfgd, afp, afgd, helo, aelo) in enumerate(match_meta, start=1):
                 if (i-1) < len(match_probs) and match_probs[i-1] is not None:
-                    p1, px, p2 = match_probs[i-1]
+                    p1, px, p2 = _extract_probs_generic(match_probs[i-1])
                     try:
                         summary = gpt_match_brief(
                             client, home_team, away_team, lg,
