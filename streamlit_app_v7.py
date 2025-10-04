@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # streamlit_app_v7.py
 # v7 — Fristående från v6 (egna data-/modellmappar), E0–E2, manuell tipsrad, säkra hemligheter
 # Baseras på din nyare v6.8 med:
@@ -7,9 +9,6 @@
 # - ELOΔ i tabellens "Stats"-kolumn
 # - SÄKER hemlighetshämtning (ingen krasch om .streamlit/secrets.toml saknas)
 # - Separata mappar (data_v7/, models_v7/) och modellfil (model_v7.pkl) → påverkar inte v6
-
-from utils import normalize_team_name, set_canonical_teams
-from __future__ import annotations
 
 import os
 import re
@@ -30,6 +29,9 @@ import joblib
 import streamlit as st
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
+
+from utils import normalize_team_name, set_canonical_teams
+
 
 # ---------- OpenAI (valfritt) ----------
 try:
