@@ -8,8 +8,8 @@
 # - SÄKER hemlighetshämtning (ingen krasch om .streamlit/secrets.toml saknas)
 # - Separata mappar (data_v7/, models_v7/) och modellfil (model_v7.pkl) → påverkar inte v6
 
+from utils import normalize_team_name, set_canonical_teams
 from __future__ import annotations
-from utils import normalize_team_name
 
 import os
 import re
@@ -500,6 +500,14 @@ with st.sidebar:
 
 files = download_files(tuple(LEAGUES), SEASON)
 df_raw = load_all_data(files)
+
+# Låt normaliseraren veta vilka lagnamn som faktiskt finns i datat
+try:
+    from utils import set_canonical_teams
+    canon = set(df_raw["HomeTeam"].dropna().astype(str)) | set(df_raw["AwayTeam"].dropna().astype(str))
+    set_canonical_teams(canon)
+except Exception:
+    pass  # kör vidare även om något skulle strula
 
 # Siffror i sidomeny
 with st.sidebar:
