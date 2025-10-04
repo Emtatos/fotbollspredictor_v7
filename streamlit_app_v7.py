@@ -705,15 +705,35 @@ if st.button("Tippa matcher", use_container_width=True):
             sign_display, pct, elo_delta = "(X)", "", ""
             tecken_list.append("(X)")
         else:
-            if (idx - 1) in half_idxs:
-                hg = _halfguard_sign(probs)
-                sign_display, pct = f"({hg})", "-"
-                tecken_list.append(f"({hg})")
-            else:
-                pred = int(np.argmax(probs))
-                sign = ['1','X','2'][pred]
-                sign_display, pct = f"({sign})", f"{probs[pred]*100:.1f}%"
-                tecken_list.append(f"({sign})")
+            # Gör om till (p1, px, p2) oavsett format
+probs3 = _extract_probs_generic(probs) if probs is not None else None
+
+if idx in half_idxs:
+    hg = _halfguard_sign(probs)        # "1X", "12" eller "X2"
+    sign_display = f"({hg})"
+    if probs3 is None:
+        pct = "-"
+    else:
+        p1, px, p2 = probs3
+        if hg == "1X":
+            p = p1 + px
+        elif hg == "12":
+            p = p1 + p2
+        else:  # "X2"
+            p = px + p2
+        pct = f"{p*100:.1f}%"
+    tecken_list.append(sign_display)
+else:
+    if probs3 is None:
+        # saknar data → behåll tecken men utan procent
+        sign_display, pct = "(X)", "-"
+        tecken_list.append("(X)")
+    else:
+        pred = int(np.argmax(probs3))
+        sign = ['1','X','2'][pred]
+        sign_display, pct = f"({sign})", f"{probs3[pred]*100:.1f}%"
+        tecken_list.append(f"({sign})")
+
             # Stats: ELOΔ
             _, _, _, _, _, _, _, helo, aelo = meta
             elo_delta = f"{helo - aelo:+.0f}"
