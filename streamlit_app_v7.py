@@ -8,8 +8,8 @@
 # - SÄKER hemlighetshämtning (ingen krasch om .streamlit/secrets.toml saknas)
 # - Separata mappar (data_v7/, models_v7/) och modellfil (model_v7.pkl) → påverkar inte v6
 
-from utils import normalize_team_name
 from __future__ import annotations
+from utils import normalize_team_name
 
 import os
 import re
