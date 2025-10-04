@@ -9,7 +9,6 @@
 # - Separata mappar (data_v7/, models_v7/) och modellfil (model_v7.pkl) → påverkar inte v6
 
 from utils import normalize_team_name
-
 from __future__ import annotations
 
 import os
@@ -80,52 +79,10 @@ def _unify_dash(s: str) -> str:
     # Tolka – (en-dash), — (em-dash) och − (minus) som bindestreck
     return re.sub(r"[–—−]", "-", s)
 
-# Football-Data → standardnamn (inkl. vanliga kortformer)
-TEAM_ALIASES = {
-    "Bradford": "Bradford City",
-    "Bradford C": "Bradford City",
-    "Bradford City": "Bradford City",
+# *** Viktigt ***
+# All namnnormlisering hämtas nu från utils.normalize_team_name
+# så att alla ställen i appen använder SAMMA logik/alias.
 
-    "Cardiff": "Cardiff City",
-    "Cardiff C": "Cardiff City",
-    "Cardiff City": "Cardiff City",
-
-    "Man United": "Manchester United",
-    "Man Utd": "Manchester United",
-    "Man City": "Manchester City",
-
-    "Sheffield Wed": "Sheffield Wednesday",
-    "Sheff Wed": "Sheffield Wednesday",
-    "Sheffield Wed.": "Sheffield Wednesday",
-    "Sheffield Utd": "Sheffield United",
-    "Sheff Utd": "Sheffield United",
-
-    "QPR": "Queens Park Rangers",
-    "Queens Park Rangers": "Queens Park Rangers",
-
-    "MK Dons": "Milton Keynes Dons",
-
-    # Wolves / Forest-varianter
-    "Wolves": "Wolverhampton Wanderers",
-    "Wolverhampton": "Wolverhampton Wanderers",
-    "Wolverhampton W": "Wolverhampton Wanderers",
-    "Wolverhampton Wanderers": "Wolverhampton Wanderers",
-
-    "Nott'm Forest": "Nottingham Forest",
-    "Nottm Forest": "Nottingham Forest",
-    "Nottingham F": "Nottingham Forest",
-    "Nottingham": "Nottingham Forest",
-    "Nottingham Forest": "Nottingham Forest",
-}
-
-def normalize_team_name(raw: str) -> str:
-    s = _norm_space(raw)
-    if s in TEAM_ALIASES:
-        return TEAM_ALIASES[s]
-    if s.endswith(" FC"):
-        s = s[:-3]
-    s = s.replace(" C.", " C")
-    return TEAM_ALIASES.get(s, s)
 
 def _safe_secret(key: str) -> Optional[str]:
     """
