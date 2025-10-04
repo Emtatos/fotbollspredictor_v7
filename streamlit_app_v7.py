@@ -722,7 +722,8 @@ if st.button("Tippa matcher", use_container_width=True):
         
         df_out = pd.DataFrame(rows, columns=["Matchnr", "Match", "Tecken", "%", "ELOΔ"])
         st.subheader("Resultat-tabell")
-        st.dataframe(df_out, hide_index=True, use_container_width=True, height=(len(df_out)+1)*36)
+        st.table(df_out)
+
 
 
     st.subheader("Tipsrad (kopiera)")
