@@ -1,3 +1,12 @@
+"""
+Fotbollspredictor v7 - Konsoliderad Streamlit-applikation
+
+Denna app kombinerar det bästa från app.py och streamlit_app_v7.py:
+- Modulär arkitektur med pipeline från main.py
+- Avancerade funktioner som halvgarderingar och OpenAI-analys
+- Förbättrad användarvänlighet och kodkvalitet
+"""
+
 import streamlit as st
 from pathlib import Path
 import logging
@@ -5,145 +14,479 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
+from typing import Optional, List, Tuple
 
-# Importera nödvändiga funktioner
+# Importera nödvändiga funktioner från moduler
 from main import run_pipeline, get_current_season_code
 from model_handler import load_model
 from xgboost import XGBClassifier
-from ui_utils import get_halfguard_sign # Vi behöver inte längre alla ui_utils
-from utils import normalize_team_name
+from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input
+from utils import normalize_team_name, set_canonical_teams
 
-# Sätt upp sidans konfiguration och titel
-st.set_page_config(page_title="Fotbollsmodellen V7", layout="wide")
-st.title("⚽ Fotbollsmodellen V7")
+# OpenAI (valfritt)
+try:
+    from openai import OpenAI
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
+
+# ============================================================================
+# KONFIGURATION
+# ============================================================================
+
+st.set_page_config(
+    page_title="Fotbollspredictor v7",
+    page_icon="⚽",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # Konfigurera logger
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# HJÄLPFUNKTIONER
+# ============================================================================
 
-# --- Modell- och Data-laddning (med cache) ---
 @st.cache_resource(show_spinner="Laddar maskininlärningsmodell...")
-def load_cached_model(model_path: Path) -> XGBClassifier | None:
-    if not model_path.exists(): return None
+def load_cached_model(model_path: Path) -> Optional[XGBClassifier]:
+    """Laddar modellen med caching för prestanda"""
+    if not model_path.exists():
+        return None
     return load_model(model_path)
 
-@st.cache_data(show_spinner="Laddar historisk data för lag...")
-def load_feature_data(path: Path) -> pd.DataFrame | None:
-    if not path.exists(): return None
-    try: return pd.read_parquet(path)
-    except Exception as e: st.error(f"Kunde inte ladda feature-data: {e}"); return None
 
-# --- NYTT: Funktion för att hämta alla kända lagnamn ---
+@st.cache_data(show_spinner="Laddar historisk data för lag...")
+def load_feature_data(path: Path) -> Optional[pd.DataFrame]:
+    """Laddar feature-data från parquet-fil"""
+    if not path.exists():
+        return None
+    try:
+        return pd.read_parquet(path)
+    except Exception as e:
+        st.error(f"Kunde inte ladda feature-data: {e}")
+        return None
+
+
 @st.cache_data
-def get_all_teams(_df_features: pd.DataFrame) -> list[str]:
-    """ Extraherar en unik, sorterad lista av alla lagnamn från feature-datan. """
+def get_all_teams(_df_features: pd.DataFrame) -> List[str]:
+    """Extraherar en unik, sorterad lista av alla lagnamn från feature-datan"""
     if _df_features is None or _df_features.empty:
         return []
     unique_teams = pd.unique(_df_features[['HomeTeam', 'AwayTeam']].values.ravel('K'))
     return sorted([str(team) for team in unique_teams])
 
 
-# --- Generella hjälpfunktioner ---
-def get_team_snapshot(team_name: str, df: pd.DataFrame) -> pd.Series | None:
+def get_team_snapshot(team_name: str, df: pd.DataFrame) -> Optional[pd.Series]:
+    """Hämtar senaste matchdata för ett lag"""
     team_matches = df[(df['HomeTeam'] == team_name) | (df['AwayTeam'] == team_name)]
-    if team_matches.empty: return None
+    if team_matches.empty:
+        return None
     return team_matches.iloc[-1]
 
-# --- Ladda in nödvändiga resurser ---
+
+def get_team_features(team_name: str, snapshot: pd.Series, df: pd.DataFrame) -> Tuple[float, float, float]:
+    """Extraherar form och ELO för ett lag från snapshot"""
+    if snapshot['HomeTeam'] == team_name:
+        return (
+            snapshot['HomeFormPts'],
+            snapshot['HomeFormGD'],
+            snapshot['HomeElo']
+        )
+    else:
+        return (
+            snapshot['AwayFormPts'],
+            snapshot['AwayFormGD'],
+            snapshot['AwayElo']
+        )
+
+
+def predict_match(
+    model: XGBClassifier,
+    home_team: str,
+    away_team: str,
+    df_features: pd.DataFrame
+) -> Optional[Tuple[np.ndarray, dict]]:
+    """
+    Gör en prediktion för en match
+    
+    Returns:
+        Tuple med (sannolikheter, statistik) eller None om data saknas
+    """
+    home_stats = get_team_snapshot(home_team, df_features)
+    away_stats = get_team_snapshot(away_team, df_features)
+    
+    if home_stats is None or away_stats is None:
+        return None
+    
+    h_form_pts, h_form_gd, h_elo = get_team_features(home_team, home_stats, df_features)
+    a_form_pts, a_form_gd, a_elo = get_team_features(away_team, away_stats, df_features)
+    
+    feature_vector = np.array([[h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo]])
+    probs = model.predict_proba(feature_vector)[0]
+    
+    stats = {
+        "home_form_pts": h_form_pts,
+        "home_form_gd": h_form_gd,
+        "home_elo": h_elo,
+        "away_form_pts": a_form_pts,
+        "away_form_gd": a_form_gd,
+        "away_elo": a_elo
+    }
+    
+    return probs, stats
+
+
+def get_openai_analysis(
+    home: str,
+    away: str,
+    probs: np.ndarray,
+    stats: dict
+) -> Optional[str]:
+    """Genererar AI-analys av matchen med OpenAI"""
+    if not HAS_OPENAI:
+        return None
+    
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        try:
+            api_key = st.secrets.get("OPENAI_API_KEY")
+        except:
+            pass
+    
+    if not api_key:
+        return None
+    
+    try:
+        client = OpenAI(api_key=api_key)
+        
+        prompt = f"""Du är en sportanalytiker. Ge en kort briefing inför matchen {home} - {away}.
+Använd endast siffrorna nedan (inga påhittade nyheter eller skador):
+- Hemma form (5): poäng {stats['home_form_pts']:.2f}, målskillnad {stats['home_form_gd']:.2f}
+- Borta form (5): poäng {stats['away_form_pts']:.2f}, målskillnad {stats['away_form_gd']:.2f}
+- ELO: {home} {stats['home_elo']:.1f}, {away} {stats['away_elo']:.1f}
+- Modellens sannolikheter: 1={probs[0]:.1%}, X={probs[1]:.1%}, 2={probs[2]:.1%}
+
+Svara med 3 korta punkter:
+1) Styrkebalans (ELO) och hemmaprofil.
+2) Formkurvor (5 matcher) och vad det antyder.
+3) Kort riskbedömning (t.ex. hög osäkerhet om 2 utfall ligger nära)."""
+        
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Du skriver kort, sakligt och utan spekulationer."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=220,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"OpenAI-analys misslyckades: {e}")
+        return None
+
+
+# ============================================================================
+# LADDA RESURSER
+# ============================================================================
+
 MODEL_FILENAME = f"xgboost_model_v7_{get_current_season_code()}.joblib"
 model_path = Path("models") / MODEL_FILENAME
 model = load_cached_model(model_path)
 df_features = load_feature_data(Path("data") / "features.parquet")
 
-# --- Sidebar ---
+# Sätt kanoniska lagnamn om data finns
+if df_features is not None and not df_features.empty:
+    try:
+        canon = set(df_features["HomeTeam"].dropna().astype(str)) | set(df_features["AwayTeam"].dropna().astype(str))
+        set_canonical_teams(canon)
+    except Exception as e:
+        logger.warning(f"Kunde inte sätta kanoniska lagnamn: {e}")
+
+# ============================================================================
+# ANVÄNDARGRÄNSSNITT
+# ============================================================================
+
+st.title("⚽ Fotbollspredictor v7")
+st.markdown("Prediktera matcher från Premier League (E0), Championship (E1) och League One (E2)")
+
+# ============================================================================
+# SIDEBAR
+# ============================================================================
+
 with st.sidebar:
-    st.header("Systemstatus")
-    if model: st.success(f"Modell laddad: `{MODEL_FILENAME}`")
-    else: st.warning(f"Ingen modell laddad.")
+    st.header("📊 Systemstatus")
+    
+    if model:
+        st.success(f"✅ Modell laddad: `{MODEL_FILENAME}`")
+    else:
+        st.warning("⚠️ Ingen modell laddad")
+    
+    if df_features is not None:
+        st.success(f"✅ Data laddad: {len(df_features)} matcher")
+        all_teams = get_all_teams(df_features)
+        st.info(f"📋 {len(all_teams)} lag tillgängliga")
+    else:
+        st.warning("⚠️ Ingen data laddad")
+        all_teams = []
+    
+    # OpenAI-status
+    if HAS_OPENAI and (os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)):
+        st.success("✅ AI-analys tillgänglig")
+    else:
+        st.info("ℹ️ AI-analys ej tillgänglig")
+    
     st.divider()
-    st.header("Åtgärder")
-    if st.button("Kör omträning av modell", help="Kör hela pipelinen."):
+    
+    st.header("🔧 Åtgärder")
+    
+    if st.button("🔄 Kör omträning av modell", help="Kör hela pipelinen för att träna om modellen", use_container_width=True):
         with st.spinner("Pipeline körs..."):
             try:
                 run_pipeline()
-                st.success("Pipelinen är färdig!")
+                st.success("✅ Pipelinen är färdig!")
                 st.cache_resource.clear()
                 st.cache_data.clear()
                 st.rerun()
-            except Exception as e: st.error(f"Ett fel inträffade: {e}")
+            except Exception as e:
+                st.error(f"❌ Ett fel inträffade: {e}")
+                logger.error(f"Pipeline misslyckades: {e}", exc_info=True)
 
-# ==============================================================================
-#  HUVUD-GRÄNSSNITT - NU MED MANUELLT VAL
-# ==============================================================================
-st.header("Prediktera en enskild match")
+# ============================================================================
+# HUVUDINNEHÅLL
+# ============================================================================
 
-if not model or df_features is None:
-    st.warning("Modell eller feature-data saknas. Kör en omträning med knappen i sidomenyn.")
-else:
-    all_teams = get_all_teams(df_features)
+if not model or df_features is None or not all_teams:
+    st.error("⚠️ Modell eller feature-data saknas. Kör en omträning med knappen i sidomenyn.")
+    st.stop()
 
-    if not all_teams:
-        st.error("Kunde inte ladda några lagnamn från datan. Kör omträning.")
-    else:
-        col1, col2 = st.columns(2)
-        with col1:
-            home_team_selection = st.selectbox(
-                "Välj hemmalag:",
-                options=all_teams,
-                index=None,
-                placeholder="Skriv för att söka..."
-            )
-        with col2:
-            away_team_selection = st.selectbox(
-                "Välj bortalag:",
-                options=all_teams,
-                index=None,
-                placeholder="Skriv för att söka..."
-            )
-        
-        # Halvgardering är antingen på eller av för en enskild match
-        use_halfguard = st.toggle("Visa halvgardering?")
+# Skapa flikar för olika funktioner
+tab1, tab2, tab3 = st.tabs(["🎯 Enskild Match", "📋 Flera Matcher", "ℹ️ Om Appen"])
 
-        if st.button("Tippa Match", type="primary", use_container_width=True):
-            if not home_team_selection or not away_team_selection:
-                st.error("Du måste välja både ett hemmalag och ett bortalag.")
-            elif home_team_selection == away_team_selection:
-                st.error("Hemmalag och bortalag kan inte vara samma.")
+# ============================================================================
+# FLIK 1: ENSKILD MATCH
+# ============================================================================
+
+with tab1:
+    st.header("Prediktera en enskild match")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        home_team_selection = st.selectbox(
+            "Välj hemmalag:",
+            options=all_teams,
+            index=None,
+            placeholder="Skriv för att söka...",
+            key="single_home"
+        )
+    
+    with col2:
+        away_team_selection = st.selectbox(
+            "Välj bortalag:",
+            options=all_teams,
+            index=None,
+            placeholder="Skriv för att söka...",
+            key="single_away"
+        )
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        use_halfguard = st.toggle("Visa halvgardering?", key="single_halfguard")
+    
+    with col4:
+        use_ai_analysis = st.toggle("Visa AI-analys?", key="single_ai", 
+                                    disabled=not (HAS_OPENAI and (os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None))))
+    
+    if st.button("⚽ Tippa Match", type="primary", use_container_width=True):
+        if not home_team_selection or not away_team_selection:
+            st.error("❌ Du måste välja både ett hemmalag och ett bortalag.")
+        elif home_team_selection == away_team_selection:
+            st.error("❌ Hemmalag och bortalag kan inte vara samma.")
+        else:
+            result = predict_match(model, home_team_selection, away_team_selection, df_features)
+            
+            if result is None:
+                st.error("❌ Kunde inte hitta historisk data för ett av de valda lagen.")
             else:
-                home_stats = get_team_snapshot(home_team_selection, df_features)
-                away_stats = get_team_snapshot(away_team_selection, df_features)
-
-                if home_stats is None or away_stats is None:
-                    # Detta bör inte hända eftersom vi väljer från listan, men som en säkerhetsåtgärd
-                    st.error("Kunde inte hitta historisk data för ett av de valda lagen.")
+                probs, stats = result
+                
+                # Bestäm tips
+                if use_halfguard:
+                    sign = get_halfguard_sign(probs)
                 else:
-                    h_form_pts, h_form_gd, h_elo = (home_stats['HomeFormPts'], home_stats['HomeFormGD'], home_stats['HomeElo']) if home_stats['HomeTeam'] == home_team_selection else (home_stats['AwayFormPts'], home_stats['AwayFormGD'], home_stats['AwayElo'])
-                    a_form_pts, a_form_gd, a_elo = (away_stats['HomeFormPts'], away_stats['HomeFormGD'], away_stats['HomeElo']) if away_stats['HomeTeam'] == away_team_selection else (away_stats['AwayFormPts'], away_stats['AwayFormGD'], away_stats['AwayElo'])
-                    
-                    feature_vector = np.array([[h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo]])
-                    probs = model.predict_proba(feature_vector)[0]
+                    sign = ['1', 'X', '2'][np.argmax(probs)]
+                
+                # Visa resultat
+                st.subheader("📊 Resultat")
+                
+                result_data = {
+                    "Match": f"{home_team_selection} - {away_team_selection}",
+                    "1 (Hemma)": f"{probs[0]:.1%}",
+                    "X (Oavgjort)": f"{probs[1]:.1%}",
+                    "2 (Borta)": f"{probs[2]:.1%}",
+                    "Tips": sign,
+                    "ELO-skillnad": f"{(stats['home_elo'] - stats['away_elo']):+.0f}",
+                    "Form-skillnad": f"{(stats['home_form_pts'] - stats['away_form_pts']):+.1f}"
+                }
+                df_result = pd.DataFrame([result_data])
+                st.dataframe(df_result, use_container_width=True, hide_index=True)
+                
+                # Visa tipsrad
+                st.subheader("📝 Tipsrad för kopiering")
+                st.code(sign, language=None)
+                
+                # AI-analys
+                if use_ai_analysis:
+                    with st.spinner("Genererar AI-analys..."):
+                        analysis = get_openai_analysis(
+                            home_team_selection,
+                            away_team_selection,
+                            probs,
+                            stats
+                        )
+                        if analysis:
+                            st.subheader("🤖 AI-analys")
+                            st.info(analysis)
+                        else:
+                            st.warning("Kunde inte generera AI-analys")
 
-                    if use_halfguard:
-                        sign = get_halfguard_sign(probs)
+# ============================================================================
+# FLIK 2: FLERA MATCHER
+# ============================================================================
+
+with tab2:
+    st.header("Prediktera flera matcher samtidigt")
+    st.markdown("Skriv in matcher, en per rad. Format: `Hemmalag - Bortalag`")
+    
+    match_input = st.text_area(
+        "Matcher:",
+        height=200,
+        placeholder="Arsenal - Chelsea\nLiverpool - Manchester United\nTottenham - Newcastle",
+        key="multi_matches"
+    )
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        num_halfguards = st.number_input(
+            "Antal halvgarderingar:",
+            min_value=0,
+            max_value=10,
+            value=0,
+            key="multi_halfguards"
+        )
+    
+    if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True):
+        if not match_input.strip():
+            st.error("❌ Skriv in minst en match.")
+        else:
+            matches = parse_match_input(match_input)
+            
+            if not matches:
+                st.error("❌ Kunde inte tolka några matcher. Kontrollera formatet.")
+            else:
+                st.subheader(f"📊 Resultat för {len(matches)} matcher")
+                
+                results = []
+                all_probs = []
+                
+                for home, away in matches:
+                    result = predict_match(model, home, away, df_features)
+                    
+                    if result is None:
+                        results.append({
+                            "Match": f"{home} - {away}",
+                            "1": "N/A",
+                            "X": "N/A",
+                            "2": "N/A",
+                            "Tips": "?",
+                            "Status": "❌ Ingen data"
+                        })
+                        all_probs.append(None)
                     else:
+                        probs, stats = result
+                        all_probs.append(probs)
+                        
                         sign = ['1', 'X', '2'][np.argmax(probs)]
-                    
-                    result = {
-                        "Match": f"{home_team_selection} - {away_team_selection}",
-                        "1": f"{probs[0]:.1%}", "X": f"{probs[1]:.1%}", "2": f"{probs[2]:.1%}",
-                        "Tips": sign,
-                        "ELO-skillnad": f"{(h_elo - a_elo):+.0f}",
-                        "Form-skillnad (Poäng)": f"{(h_form_pts - a_form_pts):+.1f}"
-                    }
-                    df_result = pd.DataFrame([result])
+                        
+                        results.append({
+                            "Match": f"{home} - {away}",
+                            "1": f"{probs[0]:.1%}",
+                            "X": f"{probs[1]:.1%}",
+                            "2": f"{probs[2]:.1%}",
+                            "Tips": sign,
+                            "Status": "✅"
+                        })
+                
+                # Applicera halvgarderingar
+                if num_halfguards > 0:
+                    guard_indices = pick_half_guards(all_probs, num_halfguards)
+                    for idx in guard_indices:
+                        if all_probs[idx] is not None:
+                            results[idx]["Tips"] = get_halfguard_sign(all_probs[idx])
+                            results[idx]["Status"] = "✅ (½)"
+                
+                df_results = pd.DataFrame(results)
+                st.dataframe(df_results, use_container_width=True, hide_index=True)
+                
+                # Visa tipsrad
+                st.subheader("📝 Tipsrad för kopiering")
+                tipsrad = "".join([r["Tips"] for r in results if r["Tips"] != "?"])
+                st.code(tipsrad, language=None)
 
-                    st.subheader("Resultat")
-                    st.dataframe(df_result, use_container_width=True, hide_index=True)
-                    st.subheader("Tipsrad för kopiering")
-                    st.code(sign, language=None)
+# ============================================================================
+# FLIK 3: OM APPEN
+# ============================================================================
 
-# Felsökningsverktyget (kan vara kvar, dolt bakom URL-parameter)
-if st.query_params.get("debug") == "true":
-    # ... (innehållet är detsamma, men kan vara bra att ha kvar)
-    pass
+with tab3:
+    st.header("Om Fotbollspredictor v7")
+    
+    st.markdown("""
+    ### 🎯 Funktioner
+    
+    - **Maskininlärning**: XGBoost-modell tränad på historisk matchdata
+    - **Ligor**: Premier League (E0), Championship (E1), League One (E2)
+    - **Features**: 
+        - Form (senaste 5 matcherna)
+        - ELO-rating
+        - Målskillnad
+    - **Halvgarderingar**: Intelligent val av osäkra matcher
+    - **AI-analys**: OpenAI-driven matchanalys (valfritt)
+    
+    ### 📊 Teknisk Stack
+    
+    - **Frontend**: Streamlit
+    - **ML**: XGBoost, scikit-learn
+    - **Data**: pandas, numpy
+    - **Tester**: pytest (42 enhetstester)
+    
+    ### 🔧 Utveckling
+    
+    Projektet följer moderna best practices:
+    - Modulär arkitektur
+    - Automatiserad testning
+    - Säker hantering av API-nycklar
+    - CI/CD-redo
+    
+    ### 📝 Version
+    
+    **v7** - Konsoliderad och förbättrad version
+    """)
+    
+    st.divider()
+    
+    st.markdown("""
+    ### 🐛 Felsökning
+    
+    Om du stöter på problem:
+    1. Kontrollera att modellen är tränad (kör omträning i sidomenyn)
+    2. Verifiera att data är nedladdad
+    3. Kontrollera loggar i terminalen
+    """)

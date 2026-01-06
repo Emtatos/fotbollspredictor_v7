@@ -6,3 +6,5 @@ requests
 python-dotenv
 pyarrow
 openai
+pytest
+pytest-cov
