@@ -95,6 +95,27 @@ TEAM_ALIASES: Dict[str, str] = {
     "Leeds": "Leeds United",
     "Ipswich": "Ipswich Town",
     "Rotherham": "Rotherham United",
+    
+    # Fler vanliga förkortningar
+    "Peterborough": "Peterboro",
+    "Peterboro": "Peterboro",
+    "Cambridge": "Cambridge United",
+    "Cambridge Utd": "Cambridge United",
+    "Salford": "Salford City",
+    "Salford City": "Salford City",
+    "Swindon": "Swindon Town",
+    "Swindon Town": "Swindon Town",
+    "Bolton": "Bolton",
+    "Bradford": "Bradford",
+    "Doncaster": "Doncaster",
+    "Exeter": "Exeter",
+    "Lincoln": "Lincoln",
+    "Mansfield": "Mansfield",
+    "Northampton": "Northampton",
+    "Port Vale": "Port Vale",
+    "Stevenage": "Stevenage",
+    "Wrexham": "Wrexham",
+    "Wycombe": "Wycombe",
 }
 
 # Token-utbyten vi provar innan fuzzy (billiga och generella)
@@ -179,7 +200,8 @@ def normalize_team_name(raw_name: str) -> str:
             r = _ratio(target, c.lower())
             if r > best_r:
                 best_c, best_r = c, r
-        if best_c and best_r >= 0.88:
+        # Sänkt tröskel från 0.88 till 0.75 för bättre matchning av förkortningar
+        if best_c and best_r >= 0.75:
             return best_c
 
     # 5) sista fallback: om aliasen delar exakt prefix
