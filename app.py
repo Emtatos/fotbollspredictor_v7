@@ -262,8 +262,21 @@ with st.sidebar:
 # ============================================================================
 
 if not model or df_features is None or not all_teams:
-    st.error("⚠️ Modell eller feature-data saknas. Kör en omträning med knappen i sidomenyn.")
-    st.stop()
+    st.warning("⚠️ Modell eller feature-data saknas. Tränar modellen automatiskt...")
+    st.info("Detta kan ta 30-60 sekunder första gången. Var god vänta...")
+    
+    try:
+        with st.spinner("Kör pipeline för att hämta data och träna modell..."):
+            run_pipeline()
+        st.success("✅ Modellen är tränad! Laddar om sidan...")
+        st.cache_resource.clear()
+        st.cache_data.clear()
+        st.rerun()
+    except Exception as e:
+        st.error(f"❌ Kunde inte träna modellen: {e}")
+        st.info("Försök köra omträning manuellt med knappen i sidomenyn.")
+        logger.error(f"Auto-training misslyckades: {e}", exc_info=True)
+        st.stop()
 
 # Skapa flikar för olika funktioner
 tab1, tab2, tab3 = st.tabs(["🎯 Enskild Match", "📋 Flera Matcher", "ℹ️ Om Appen"])
