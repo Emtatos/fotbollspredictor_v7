@@ -36,7 +36,7 @@ def run_pipeline():
 
     # --- 1. Konfiguration ---
     SEASON = get_current_season_code()
-    LEAGUES = ["E0", "E1", "E2"]  # Premier League, Championship, League One
+    LEAGUES = ["E0", "E1", "E2", "E3"]  # Premier League, Championship, League One, League Two
     MODEL_FILENAME = f"xgboost_model_v7_{SEASON}.joblib"
     model_path = Path("models") / MODEL_FILENAME
 

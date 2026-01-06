@@ -26,7 +26,7 @@ class Config:
     API_FOOTBALL_URL = "https://v3.football.api-sports.io"
     
     # Ligor
-    LEAGUES = ["E0", "E1", "E2"]  # Premier League, Championship, League One
+    LEAGUES = ["E0", "E1", "E2", "E3"]  # Premier League, Championship, League One, League Two
     
     # Modellparametrar
     MODEL_PARAMS = {

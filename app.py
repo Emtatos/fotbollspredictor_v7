@@ -213,7 +213,7 @@ if df_features is not None and not df_features.empty:
 # ============================================================================
 
 st.title("⚽ Fotbollspredictor v7")
-st.markdown("Prediktera matcher från Premier League (E0), Championship (E1) och League One (E2)")
+st.markdown("Prediktera matcher från Premier League (E0), Championship (E1), League One (E2) och League Two (E3)")
 
 # ============================================================================
 # SIDEBAR
