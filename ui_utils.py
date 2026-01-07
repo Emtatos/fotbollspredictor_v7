@@ -10,6 +10,12 @@ def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
     """
     Parar en text med flera rader av matcher (t.ex. "Arsenal - Chelsea")
     till en lista av normaliserade lagpar.
+    
+    Stödjer format:
+    - "Arsenal - Chelsea"
+    - "Arsenal-Chelsea" 
+    - "Arsenal vs Chelsea"
+    - "Arsenal mot Chelsea"
     """
     parsed_matches = []
     lines = text_input.strip().split('\n')
@@ -18,14 +24,17 @@ def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
         if not line:
             continue
         
-        parts = re.split(r'\s+-\s+|\s+vs\s+|\s+mot\s+', line, maxsplit=1)
+        # Försök olika separatorer (mer flexibel regex)
+        # Matchar: " - ", "-", " vs ", " mot ", etc.
+        parts = re.split(r'\s*[-–—]\s*|\s+vs\.?\s+|\s+mot\s+', line, maxsplit=1, flags=re.IGNORECASE)
         
         if len(parts) == 2:
-            home_raw, away_raw = parts
-            home_team = normalize_team_name(home_raw)
-            away_team = normalize_team_name(away_raw)
-            if home_team and away_team:
-                parsed_matches.append((home_team, away_team))
+            home_raw, away_raw = parts[0].strip(), parts[1].strip()
+            if home_raw and away_raw:
+                home_team = normalize_team_name(home_raw)
+                away_team = normalize_team_name(away_raw)
+                if home_team and away_team:
+                    parsed_matches.append((home_team, away_team))
     
     return parsed_matches
 
