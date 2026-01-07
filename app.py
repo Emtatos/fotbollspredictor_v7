@@ -96,20 +96,30 @@ def get_team_snapshot(team_name: str, df: pd.DataFrame) -> Optional[pd.Series]:
     return team_matches.iloc[-1]
 
 
-def get_team_features(team_name: str, snapshot: pd.Series, df: pd.DataFrame) -> Tuple[float, float, float]:
-    """Extraherar form och ELO för ett lag från snapshot"""
+def get_team_features(team_name: str, snapshot: pd.Series, df: pd.DataFrame) -> dict:
+    """Extraherar alla features för ett lag från snapshot"""
     if snapshot['HomeTeam'] == team_name:
-        return (
-            snapshot['HomeFormPts'],
-            snapshot['HomeFormGD'],
-            snapshot['HomeElo']
-        )
+        return {
+            'FormPts': snapshot['HomeFormPts'],
+            'FormGD': snapshot['HomeFormGD'],
+            'FormHome': snapshot['HomeFormHome'],
+            'GoalsFor': snapshot['HomeGoalsFor'],
+            'GoalsAgainst': snapshot['HomeGoalsAgainst'],
+            'Streak': snapshot['HomeStreak'],
+            'Position': snapshot['HomePosition'],
+            'Elo': snapshot['HomeElo']
+        }
     else:
-        return (
-            snapshot['AwayFormPts'],
-            snapshot['AwayFormGD'],
-            snapshot['AwayElo']
-        )
+        return {
+            'FormPts': snapshot['AwayFormPts'],
+            'FormGD': snapshot['AwayFormGD'],
+            'FormHome': snapshot['AwayFormAway'],
+            'GoalsFor': snapshot['AwayGoalsFor'],
+            'GoalsAgainst': snapshot['AwayGoalsAgainst'],
+            'Streak': snapshot['AwayStreak'],
+            'Position': snapshot['AwayPosition'],
+            'Elo': snapshot['AwayElo']
+        }
 
 
 def predict_match(
@@ -130,19 +140,52 @@ def predict_match(
     if home_stats is None or away_stats is None:
         return None
     
-    h_form_pts, h_form_gd, h_elo = get_team_features(home_team, home_stats, df_features)
-    a_form_pts, a_form_gd, a_elo = get_team_features(away_team, away_stats, df_features)
+    home_features = get_team_features(home_team, home_stats, df_features)
+    away_features = get_team_features(away_team, away_stats, df_features)
     
-    feature_vector = np.array([[h_form_pts, h_form_gd, a_form_pts, a_form_gd, h_elo, a_elo]])
+    # Beräkna H2H features från snapshot
+    h2h_home_wins = home_stats.get('H2H_HomeWins', 0)
+    h2h_draws = home_stats.get('H2H_Draws', 0)
+    h2h_away_wins = home_stats.get('H2H_AwayWins', 0)
+    h2h_home_goal_diff = home_stats.get('H2H_HomeGoalDiff', 0)
+    position_diff = home_features['Position'] - away_features['Position']
+    
+    # Skapa feature vector med alla 21 features
+    feature_vector = np.array([[
+        home_features['FormPts'],
+        home_features['FormGD'],
+        away_features['FormPts'],
+        away_features['FormGD'],
+        home_features['FormHome'],
+        away_features['FormHome'],
+        home_features['GoalsFor'],
+        home_features['GoalsAgainst'],
+        away_features['GoalsFor'],
+        away_features['GoalsAgainst'],
+        home_features['Streak'],
+        away_features['Streak'],
+        h2h_home_wins,
+        h2h_draws,
+        h2h_away_wins,
+        h2h_home_goal_diff,
+        home_features['Position'],
+        away_features['Position'],
+        position_diff,
+        home_features['Elo'],
+        away_features['Elo']
+    ]])
+    
     probs = model.predict_proba(feature_vector)[0]
     
     stats = {
-        "home_form_pts": h_form_pts,
-        "home_form_gd": h_form_gd,
-        "home_elo": h_elo,
-        "away_form_pts": a_form_pts,
-        "away_form_gd": a_form_gd,
-        "away_elo": a_elo
+        "home_form_pts": home_features['FormPts'],
+        "home_form_gd": home_features['FormGD'],
+        "home_elo": home_features['Elo'],
+        "away_form_pts": away_features['FormPts'],
+        "away_form_gd": away_features['FormGD'],
+        "away_elo": away_features['Elo'],
+        "home_goals_for": home_features['GoalsFor'],
+        "away_goals_for": away_features['GoalsFor']
     }
     
     return probs, stats
