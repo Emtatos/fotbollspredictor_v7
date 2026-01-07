@@ -21,7 +21,7 @@ from main import run_pipeline, get_current_season_code
 from model_handler import load_model
 from xgboost import XGBClassifier
 from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input
-from utils import normalize_team_name, set_canonical_teams
+from utils import normalize_team_name, set_canonical_teams, get_canonical_teams
 
 # OpenAI (valfritt)
 try:
@@ -400,10 +400,20 @@ with tab2:
         if not match_input.strip():
             st.error("❌ Skriv in minst en match.")
         else:
+            # Säkerställ att kanoniska lag är satta innan parsing
+            if df_features is not None and not df_features.empty:
+                canon = set(df_features["HomeTeam"].dropna().astype(str)) | set(df_features["AwayTeam"].dropna().astype(str))
+                set_canonical_teams(canon)
+            
             matches = parse_match_input(match_input)
             
             if not matches:
                 st.error("❌ Kunde inte tolka några matcher. Kontrollera formatet.")
+                with st.expander("🔍 Felsökning"):
+                    st.write("Antal rader i input:", len(match_input.strip().split('\n')))
+                    st.write("Första raden:", match_input.strip().split('\n')[0] if match_input.strip() else "Tom")
+                    st.write("Antal kanoniska lag:", len(get_canonical_teams()))
+                    st.write("Exempel på kanoniska lag:", list(get_canonical_teams())[:10])
             else:
                 st.subheader(f"📊 Resultat för {len(matches)} matcher")
                 
