@@ -26,26 +26,48 @@ def get_current_season_code() -> str:
         end_year = year + 1
     return f"{str(start_year)[-2:]}{str(end_year)[-2:]}"
 
-def run_pipeline():
+def run_pipeline(include_previous_seasons=True):
     """
     Kör hela databehandlings- och modellträningspipelinen.
+    
+    Parametrar:
+    -----------
+    include_previous_seasons : bool
+        Om True, inkludera data från 2 tidigare säsonger för bättre träning
     """
     logger.info("=============================================")
     logger.info("=== Startar pipeline för fotbollsmodell ===")
     logger.info("=============================================")
 
     # --- 1. Konfiguration ---
-    SEASON = get_current_season_code()
+    CURRENT_SEASON = get_current_season_code()
     LEAGUES = ["E0", "E1", "E2", "E3"]  # Premier League, Championship, League One, League Two
-    MODEL_FILENAME = f"xgboost_model_v7_{SEASON}.joblib"
+    MODEL_FILENAME = f"xgboost_model_v7_{CURRENT_SEASON}.joblib"
     model_path = Path("models") / MODEL_FILENAME
 
-    logger.info("Säsong: %s, Ligor: %s", SEASON, LEAGUES)
+    # Bestäm vilka säsonger att inkludera
+    if include_previous_seasons:
+        # Inkludera nuvarande + 2 tidigare säsonger
+        seasons = [
+            str(int(CURRENT_SEASON) - 202),  # 2 säsonger tillbaka (t.ex. 2526 -> 2324)
+            str(int(CURRENT_SEASON) - 101),  # 1 säsong tillbaka (t.ex. 2526 -> 2425)
+            CURRENT_SEASON  # Nuvarande säsong
+        ]
+        logger.info("Inkluderar %d säsonger: %s", len(seasons), seasons)
+    else:
+        seasons = [CURRENT_SEASON]
+        logger.info("Använder endast nuvarande säsong: %s", CURRENT_SEASON)
+    
+    logger.info("Ligor: %s", LEAGUES)
     logger.info("Modellfil: %s", model_path)
 
-    # --- 2. Hämta rådata ---
+    # --- 2. Hämta rådata för alla säsonger ---
     logger.info("--- Steg 1: Hämtar rådata ---")
-    downloaded_files = download_season_data(season_code=SEASON, leagues=LEAGUES)
+    downloaded_files = []
+    for season in seasons:
+        logger.info("Hämtar data för säsong %s...", season)
+        files = download_season_data(season_code=season, leagues=LEAGUES)
+        downloaded_files.extend(files)
     if not downloaded_files:
         logger.error("Inga filer kunde laddas ner. Avbryter pipeline.")
         return
@@ -98,4 +120,5 @@ def run_pipeline():
     logger.info("==========================================")
 
 if __name__ == "__main__":
-    run_pipeline()
+    # Kör med tidigare säsonger för bättre träning
+    run_pipeline(include_previous_seasons=True)

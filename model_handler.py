@@ -21,13 +21,14 @@ def _init_xgb_classifier() -> XGBClassifier:
     Initiera XGBClassifier med fallback om vissa parametrar inte stöds
     (t.ex. 'use_label_encoder' borttagen i nyare versioner).
     """
+    # Optimerade hyperparametrar från tuning
     base_kwargs = dict(
         objective="multi:softprob",
-        n_estimators=250,
-        learning_rate=0.1,
-        max_depth=4,
-        subsample=0.8,
-        colsample_bytree=0.8,
+        n_estimators=100,  # Mindre estimators för snabbare träning
+        learning_rate=0.01,  # Långsammare inlärning för bättre generalisering
+        max_depth=3,  # Mindre djup för att undvika överanpassning
+        subsample=1.0,
+        colsample_bytree=1.0,
         eval_metric="mlogloss",
         n_jobs=-1,
         random_state=42,
@@ -81,10 +82,13 @@ def train_and_save_model(
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1) Features & mål
+        # 1) Features & mål (inkludera alla nya features)
         feature_cols = [
-            "HomeFormPts", "HomeFormGD", "AwayFormPts", "AwayFormGD",
-            "HomeElo", "AwayElo"
+            'HomeFormPts', 'HomeFormGD', 'AwayFormPts', 'AwayFormGD',
+            'HomeFormHome', 'AwayFormAway',
+            'HomeGoalsFor', 'HomeGoalsAgainst', 'AwayGoalsFor', 'AwayGoalsAgainst',
+            'HomeStreak', 'AwayStreak',
+            'HomeElo', 'AwayElo'
         ]
         X = df_features[feature_cols]
         y = df_features["FTR"].map({"H": 0, "D": 1, "A": 2})
