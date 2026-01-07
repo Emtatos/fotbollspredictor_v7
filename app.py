@@ -23,6 +23,13 @@ from xgboost import XGBClassifier
 from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input
 from utils import normalize_team_name, set_canonical_teams, get_canonical_teams
 
+# News scraper för AI-analys
+try:
+    from news_scraper_v2 import get_match_context, IntelligentFootballAnalyzer
+    HAS_NEWS_SCRAPER = True
+except ImportError:
+    HAS_NEWS_SCRAPER = False
+
 # OpenAI (valfritt)
 try:
     from openai import OpenAI

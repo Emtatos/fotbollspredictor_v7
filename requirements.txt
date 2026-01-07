@@ -8,3 +8,5 @@ pyarrow
 openai
 pytest
 pytest-cov
+beautifulsoup4==4.14.3
+lxml==6.0.2
