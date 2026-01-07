@@ -49,17 +49,19 @@ def _calculate_home_away_form(df: pd.DataFrame) -> pd.DataFrame:
     home_points = defaultdict(lambda: deque(maxlen=5))
     away_points = defaultdict(lambda: deque(maxlen=5))
     
-    df['HomeFormHome'] = np.nan
-    df['AwayFormAway'] = np.nan
+    df['HomeFormHome'] = np.nan  # Form i hemmamatcher
+    df['AwayFormAway'] = np.nan  # Form i bortamatcher
     
     for index, row in df.iterrows():
         home_team, away_team = row['HomeTeam'], row['AwayTeam']
         
+        # Sätt form baserat på tidigare hemma/bortamatcher
         if len(home_points[home_team]) > 0:
             df.loc[index, 'HomeFormHome'] = np.mean(list(home_points[home_team]))
         if len(away_points[away_team]) > 0:
             df.loc[index, 'AwayFormAway'] = np.mean(list(away_points[away_team]))
         
+        # Uppdatera efter matchen
         if row['FTR'] == 'H':
             home_points[home_team].append(3)
             away_points[away_team].append(0)
@@ -87,6 +89,7 @@ def _calculate_goal_stats(df: pd.DataFrame) -> pd.DataFrame:
     for index, row in df.iterrows():
         home_team, away_team = row['HomeTeam'], row['AwayTeam']
         
+        # Sätt statistik före matchen
         if len(team_goals_for[home_team]) > 0:
             df.loc[index, 'HomeGoalsFor'] = np.mean(list(team_goals_for[home_team]))
             df.loc[index, 'HomeGoalsAgainst'] = np.mean(list(team_goals_against[home_team]))
@@ -94,6 +97,7 @@ def _calculate_goal_stats(df: pd.DataFrame) -> pd.DataFrame:
             df.loc[index, 'AwayGoalsFor'] = np.mean(list(team_goals_for[away_team]))
             df.loc[index, 'AwayGoalsAgainst'] = np.mean(list(team_goals_against[away_team]))
         
+        # Uppdatera efter matchen
         team_goals_for[home_team].append(row['FTHG'])
         team_goals_against[home_team].append(row['FTAG'])
         team_goals_for[away_team].append(row['FTAG'])
@@ -105,7 +109,7 @@ def _calculate_goal_stats(df: pd.DataFrame) -> pd.DataFrame:
 
 def _calculate_streaks(df: pd.DataFrame) -> pd.DataFrame:
     """Beräknar vinst/förlust-sviter"""
-    team_streak = defaultdict(int)
+    team_streak = defaultdict(int)  # Positiv = vinster, negativ = förluster, 0 = oavgjort
     
     df['HomeStreak'] = 0
     df['AwayStreak'] = 0
@@ -113,135 +117,40 @@ def _calculate_streaks(df: pd.DataFrame) -> pd.DataFrame:
     for index, row in df.iterrows():
         home_team, away_team = row['HomeTeam'], row['AwayTeam']
         
+        # Sätt streak före matchen
         df.loc[index, 'HomeStreak'] = team_streak[home_team]
         df.loc[index, 'AwayStreak'] = team_streak[away_team]
         
+        # Uppdatera streak efter matchen
         if row['FTR'] == 'H':
+            # Hemmavinst
             if team_streak[home_team] >= 0:
                 team_streak[home_team] += 1
             else:
                 team_streak[home_team] = 1
             
+            # Bortaförlust
             if team_streak[away_team] <= 0:
                 team_streak[away_team] -= 1
             else:
                 team_streak[away_team] = -1
         
         elif row['FTR'] == 'A':
+            # Bortavinst
             if team_streak[away_team] >= 0:
                 team_streak[away_team] += 1
             else:
                 team_streak[away_team] = 1
             
+            # Hemmaförlust
             if team_streak[home_team] <= 0:
                 team_streak[home_team] -= 1
             else:
                 team_streak[home_team] = -1
         
-        else:
+        else:  # Oavgjort
             team_streak[home_team] = 0
             team_streak[away_team] = 0
-    
-    return df
-
-
-def _calculate_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
-    """Beräknar Head-to-Head statistik (senaste 5 mötena mellan lagen)"""
-    h2h_history = defaultdict(lambda: deque(maxlen=5))
-    
-    df['H2H_HomeWins'] = 0
-    df['H2H_Draws'] = 0
-    df['H2H_AwayWins'] = 0
-    df['H2H_HomeGoalDiff'] = 0.0
-    
-    for index, row in df.iterrows():
-        home_team, away_team = row['HomeTeam'], row['AwayTeam']
-        matchup = tuple(sorted([home_team, away_team]))
-        
-        # Beräkna statistik från tidigare möten
-        if len(h2h_history[matchup]) > 0:
-            home_wins = 0
-            away_wins = 0
-            draws = 0
-            goal_diff = 0
-            
-            for prev_match in h2h_history[matchup]:
-                prev_home, prev_away, prev_result, prev_gd = prev_match
-                
-                # Justera för om lagen bytt plats
-                if prev_home == home_team:
-                    if prev_result == 'H':
-                        home_wins += 1
-                    elif prev_result == 'A':
-                        away_wins += 1
-                    else:
-                        draws += 1
-                    goal_diff += prev_gd
-                else:  # Lagen har bytt plats
-                    if prev_result == 'H':
-                        away_wins += 1
-                    elif prev_result == 'A':
-                        home_wins += 1
-                    else:
-                        draws += 1
-                    goal_diff -= prev_gd
-            
-            df.loc[index, 'H2H_HomeWins'] = home_wins
-            df.loc[index, 'H2H_Draws'] = draws
-            df.loc[index, 'H2H_AwayWins'] = away_wins
-            df.loc[index, 'H2H_HomeGoalDiff'] = goal_diff / len(h2h_history[matchup])
-        
-        # Spara denna match i historiken
-        h2h_history[matchup].append((home_team, away_team, row['FTR'], row['FTHG'] - row['FTAG']))
-    
-    return df
-
-
-def _calculate_league_position(df: pd.DataFrame) -> pd.DataFrame:
-    """Beräknar ligaposition baserat på poäng och målskillnad"""
-    # Gruppera per säsong och liga (om det finns)
-    # För enkelhetens skull: beräkna position baserat på alla matcher hittills
-    
-    team_stats = defaultdict(lambda: {'points': 0, 'gd': 0, 'games': 0})
-    
-    df['HomePosition'] = 0
-    df['AwayPosition'] = 0
-    df['PositionDiff'] = 0
-    
-    for index, row in df.iterrows():
-        home_team, away_team = row['HomeTeam'], row['AwayTeam']
-        
-        # Beräkna nuvarande positioner
-        if team_stats[home_team]['games'] > 0 and team_stats[away_team]['games'] > 0:
-            # Sortera alla lag efter poäng och målskillnad
-            sorted_teams = sorted(
-                team_stats.items(),
-                key=lambda x: (x[1]['points'], x[1]['gd']),
-                reverse=True
-            )
-            
-            # Hitta positioner
-            home_pos = next((i+1 for i, (team, _) in enumerate(sorted_teams) if team == home_team), 0)
-            away_pos = next((i+1 for i, (team, _) in enumerate(sorted_teams) if team == away_team), 0)
-            
-            df.loc[index, 'HomePosition'] = home_pos
-            df.loc[index, 'AwayPosition'] = away_pos
-            df.loc[index, 'PositionDiff'] = away_pos - home_pos  # Positivt = hemmalaget högre placerat
-        
-        # Uppdatera statistik efter matchen
-        home_gd = row['FTHG'] - row['FTAG']
-        if row['FTR'] == 'H':
-            team_stats[home_team]['points'] += 3
-        elif row['FTR'] == 'D':
-            team_stats[home_team]['points'] += 1
-            team_stats[away_team]['points'] += 1
-        else:
-            team_stats[away_team]['points'] += 3
-        
-        team_stats[home_team]['gd'] += home_gd
-        team_stats[away_team]['gd'] -= home_gd
-        team_stats[home_team]['games'] += 1
-        team_stats[away_team]['games'] += 1
     
     return df
 
@@ -283,7 +192,7 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     df_copy.reset_index(drop=True, inplace=True)
 
     # Normalisera lagnamn
-    logger.info("--- STARTAR FEATURE ENGINEERING V3 ---")
+    logger.info("--- STARTAR FEATURE ENGINEERING V2 ---")
     
     def log_and_normalize(name):
         normalized = normalize_team_name(name)
@@ -307,14 +216,8 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Beräknar streaks...")
     df_with_streaks = _calculate_streaks(df_with_goals)
     
-    logger.info("Beräknar Head-to-Head statistik...")
-    df_with_h2h = _calculate_head_to_head(df_with_streaks)
-    
-    logger.info("Beräknar ligaposition...")
-    df_with_position = _calculate_league_position(df_with_h2h)
-    
     logger.info("Beräknar ELO-rating...")
-    df_final = _calculate_elo(df_with_position)
+    df_final = _calculate_elo(df_with_streaks)
     
     added_cols = [c for c in df_final.columns if c not in df.columns]
     logger.info(f"Feature engineering slutförd. Nya kolumner ({len(added_cols)}): {added_cols}")

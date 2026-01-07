@@ -82,12 +82,14 @@ def train_and_save_model(
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1) Features & mål (inkludera alla nya features)
+        # 1) Features & mål (inkludera alla features inkl. H2H och position)
         feature_cols = [
             'HomeFormPts', 'HomeFormGD', 'AwayFormPts', 'AwayFormGD',
             'HomeFormHome', 'AwayFormAway',
             'HomeGoalsFor', 'HomeGoalsAgainst', 'AwayGoalsFor', 'AwayGoalsAgainst',
             'HomeStreak', 'AwayStreak',
+            'H2H_HomeWins', 'H2H_Draws', 'H2H_AwayWins', 'H2H_HomeGoalDiff',
+            'HomePosition', 'AwayPosition', 'PositionDiff',
             'HomeElo', 'AwayElo'
         ]
         X = df_features[feature_cols]
