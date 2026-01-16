@@ -30,6 +30,13 @@ try:
 except ImportError:
     HAS_NEWS_SCRAPER = False
 
+# Injury scraper
+try:
+    from injury_scraper import InjuryDataFetcher, update_injury_data, get_injury_features_for_match
+    HAS_INJURY_SCRAPER = True
+except ImportError:
+    HAS_INJURY_SCRAPER = False
+
 # OpenAI (valfritt)
 try:
     from openai import OpenAI
@@ -150,7 +157,18 @@ def predict_match(
     h2h_home_goal_diff = home_stats.get('H2H_HomeGoalDiff', 0)
     position_diff = home_features['Position'] - away_features['Position']
     
-    # Skapa feature vector med alla 21 features
+    # Hämta skade-features om tillgängligt
+    injury_features = {'InjuredPlayers_Home': 0, 'InjuredPlayers_Away': 0, 
+                      'KeyPlayersOut_Home': 0, 'KeyPlayersOut_Away': 0,
+                      'InjurySeverity_Home': 0, 'InjurySeverity_Away': 0}
+    
+    if HAS_INJURY_SCRAPER:
+        try:
+            injury_features = get_injury_features_for_match(home_team, away_team)
+        except Exception as e:
+            logger.warning(f"Kunde inte hämta skade-features: {e}")
+    
+    # Skapa feature vector med alla 27 features (21 original + 6 skade-features)
     feature_vector = np.array([[
         home_features['FormPts'],
         home_features['FormGD'],
@@ -172,7 +190,13 @@ def predict_match(
         away_features['Position'],
         position_diff,
         home_features['Elo'],
-        away_features['Elo']
+        away_features['Elo'],
+        injury_features['InjuredPlayers_Home'],
+        injury_features['InjuredPlayers_Away'],
+        injury_features['KeyPlayersOut_Home'],
+        injury_features['KeyPlayersOut_Away'],
+        injury_features['InjurySeverity_Home'],
+        injury_features['InjurySeverity_Away']
     ]])
     
     probs = model.predict_proba(feature_vector)[0]
@@ -291,9 +315,45 @@ with st.sidebar:
     else:
         st.info("ℹ️ AI-analys ej tillgänglig")
     
+    # Skade-data status
+    if HAS_INJURY_SCRAPER:
+        injury_file = Path('data/injuries_latest.json')
+        if injury_file.exists():
+            fetcher = InjuryDataFetcher()
+            if fetcher.is_data_stale():
+                st.warning("⚠️ Skadedata är gammal (>24h)")
+            else:
+                # Läs tidpunkt
+                import json
+                with open(injury_file, 'r') as f:
+                    data = json.load(f)
+                    last_update = data.get('last_updated', 'Okänd')
+                    if last_update != 'Okänd':
+                        last_update = datetime.fromisoformat(last_update).strftime("%Y-%m-%d %H:%M")
+                st.success(f"✅ Skadedata uppdaterad: {last_update}")
+        else:
+            st.info("ℹ️ Skadedata saknas - klicka 'Uppdatera skador'")
+    
     st.divider()
     
     st.header("🔧 Åtgärder")
+    
+    # Knapp för att uppdatera skadedata
+    if HAS_INJURY_SCRAPER:
+        if st.button("🎪 Uppdatera skador & form", help="Hämtar senaste skador och matchresultat", use_container_width=True):
+            with st.spinner("🔄 Hämtar färsk data..."):
+                try:
+                    # Uppdatera skadedata
+                    success = update_injury_data()
+                    
+                    if success:
+                        st.success("✅ Skadedata uppdaterad!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Kunde inte uppdatera skadedata. Kontrollera API-nyckel.")
+                except Exception as e:
+                    st.error(f"❌ Fel vid uppdatering: {e}")
+                    logger.error(f"Injury update failed: {e}", exc_info=True)
     
     if st.button("🔄 Kör omträning av modell", help="Kör hela pipelinen för att träna om modellen", use_container_width=True):
         with st.spinner("Pipeline körs..."):

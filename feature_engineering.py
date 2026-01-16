@@ -9,6 +9,14 @@ from utils import normalize_team_name
 # Få tag i logger-instansen
 logger = logging.getLogger(__name__)
 
+# Import för skade-features (optional)
+try:
+    from injury_scraper import InjuryDataFetcher, get_injury_features_for_match
+    INJURY_FEATURES_AVAILABLE = True
+except ImportError:
+    INJURY_FEATURES_AVAILABLE = False
+    logger.warning("injury_scraper inte tillgänglig - skade-features inaktiverade")
+
 def _calculate_form(df: pd.DataFrame) -> pd.DataFrame:
     """Beräknar form baserat på senaste 5 matcherna (poäng och målskillnad)"""
     team_points = defaultdict(lambda: deque(maxlen=5))
@@ -273,6 +281,29 @@ def _calculate_elo(df: pd.DataFrame, k_factor: int = 20) -> pd.DataFrame:
     return df
 
 
+def _add_injury_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lägger till skade-features från injury_scraper
+    
+    Dessa features är statiska (inte historiska) och representerar
+    aktuellt läge vid tidpunkten för prediktion.
+    """
+    # Initiera kolumner med default-värden
+    df['InjuredPlayers_Home'] = 0
+    df['InjuredPlayers_Away'] = 0
+    df['KeyPlayersOut_Home'] = 0
+    df['KeyPlayersOut_Away'] = 0
+    df['InjurySeverity_Home'] = 0.0
+    df['InjurySeverity_Away'] = 0.0
+    
+    # För historisk data sätter vi alla till 0
+    # (vi har inte historisk skadedata)
+    # När vi gör prediktioner uppdateras dessa i app.py
+    
+    logger.info("Skade-features initierade (kommer uppdateras vid prediktion)")
+    return df
+
+
 def create_features(df: pd.DataFrame) -> pd.DataFrame:
     """Huvudfunktion som skapar alla features"""
     if df.empty:
@@ -315,6 +346,11 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     
     logger.info("Beräknar ELO-rating...")
     df_final = _calculate_elo(df_with_position)
+    
+    # Lägg till skade-features om tillgängligt
+    if INJURY_FEATURES_AVAILABLE:
+        logger.info("Lägger till skade-features...")
+        df_final = _add_injury_features(df_final)
     
     added_cols = [c for c in df_final.columns if c not in df.columns]
     logger.info(f"Feature engineering slutförd. Nya kolumner ({len(added_cols)}): {added_cols}")
