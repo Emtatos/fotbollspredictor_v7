@@ -1,0 +1,75 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Data (kan vara stora, ladda ner vid runtime istället)
+data/*.csv
+data/*.parquet
+
+# Models (tränas vid build/runtime)
+models/*.joblib
+models/*.pkl
+
+# Environment
+.env
+.env.local
+
+# Docker
+docker-compose.override.yml
+Dockerfile.dev
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
