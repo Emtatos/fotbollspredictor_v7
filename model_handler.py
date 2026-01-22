@@ -82,7 +82,7 @@ def train_and_save_model(
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1) Features & mål (inkludera alla features inkl. H2H och position)
+        # 1) Features & mål (inkludera alla features inkl. H2H, position och skador)
         feature_cols = [
             'HomeFormPts', 'HomeFormGD', 'AwayFormPts', 'AwayFormGD',
             'HomeFormHome', 'AwayFormAway',
@@ -92,6 +92,16 @@ def train_and_save_model(
             'HomePosition', 'AwayPosition', 'PositionDiff',
             'HomeElo', 'AwayElo'
         ]
+        
+        # Lägg till skade-features om de finns
+        injury_features = ['InjuredPlayers_Home', 'InjuredPlayers_Away', 
+                          'KeyPlayersOut_Home', 'KeyPlayersOut_Away',
+                          'InjurySeverity_Home', 'InjurySeverity_Away']
+        for feature in injury_features:
+            if feature in df_features.columns:
+                feature_cols.append(feature)
+        
+        logging.info(f"Tränar modell med {len(feature_cols)} features: {feature_cols}")
         X = df_features[feature_cols]
         y = df_features["FTR"].map({"H": 0, "D": 1, "A": 2})
 
