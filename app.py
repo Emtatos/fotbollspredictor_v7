@@ -579,47 +579,133 @@ with tab2:
 # ============================================================================
 
 with tab3:
-    st.header("Om Fotbollspredictor v7")
+    st.header("Om Fotbollspredictor v7.6")
     
     st.markdown("""
-    ### 🎯 Funktioner
-    
-    - **Maskininlärning**: XGBoost-modell tränad på historisk matchdata
-    - **Ligor**: Premier League (E0), Championship (E1), League One (E2)
-    - **Features**: 
-        - Form (senaste 5 matcherna)
-        - ELO-rating
-        - Målskillnad
-    - **Halvgarderingar**: Intelligent val av osäkra matcher
-    - **AI-analys**: OpenAI-driven matchanalys (valfritt)
-    
-    ### 📊 Teknisk Stack
-    
-    - **Frontend**: Streamlit
-    - **ML**: XGBoost, scikit-learn
-    - **Data**: pandas, numpy
-    - **Tester**: pytest (42 enhetstester)
-    
-    ### 🔧 Utveckling
-    
-    Projektet följer moderna best practices:
-    - Modulär arkitektur
-    - Automatiserad testning
-    - Säker hantering av API-nycklar
-    - CI/CD-redo
-    
-    ### 📝 Version
-    
-    **v7** - Konsoliderad och förbättrad version
+    Fotbollspredictor v7.6 är en avancerad maskininlärningsapplikation designad för att prediktera fotbollsmatcher 
+    med hög noggrannhet. Appen kombinerar statistisk analys med realtidsdata för att ge insiktsfulla och datadrivna förutsägelser.
     """)
     
     st.divider()
     
-    st.markdown("""
-    ### 🐛 Felsökning
+    st.subheader("🧠 Hur fungerar modellen?")
     
-    Om du stöter på problem:
-    1. Kontrollera att modellen är tränad (kör omträning i sidomenyn)
-    2. Verifiera att data är nedladdad
-    3. Kontrollera loggar i terminalen
+    st.markdown("""
+    Modellen använder en **XGBoost-algoritm** (Extreme Gradient Boosting), en kraftfull och beprövad metod för 
+    prediktiv modellering. Den tränas på tusentals historiska matcher från Premier League, Championship och League One.
     """)
+    
+    st.markdown("#### Features (27 totalt)")
+    st.markdown("Modellen analyserar **27 olika features** för varje match. Dessa kan delas in i fem huvudkategorier:")
+    
+    feature_data = {
+        "Kategori": ["Form", "Målstatistik", "Momentum", "Head-to-Head", "Styrka & Position", "Mänsklig påverkan"],
+        "Antal": [6, 4, 2, 4, 5, 6],
+        "Exempel på features": [
+            "Genomsnittlig poäng, målskillnad (senaste 5 matcher)",
+            "Genomsnitt gjorda/insläppta mål",
+            "Vinst/förlust-streak",
+            "Tidigare möten mellan lagen",
+            "ELO-rating, ligaposition",
+            "Skador, suspenderingar, nyckelspelare borta"
+        ]
+    }
+    st.dataframe(feature_data, use_container_width=True, hide_index=True)
+    
+    st.info("""
+    **Nytt i v7.6: Mänsklig påverkan**
+    
+    Den senaste versionen integrerar **skador och suspenderingar** via API-Football. Detta ger en mer realistisk bild 
+    av lagens aktuella styrka.
+    
+    - **Datakälla:** API-Football (uppdateras dagligen)
+    - **Nya features:** Antal skadade, antal nyckelspelare borta, allvarlighetsgrad (0-10)
+    - **Användning:** Klicka "Uppdatera skador & form" i sidomenyn för att hämta färsk data.
+    """)
+    
+    st.divider()
+    
+    st.subheader("🎯 Funktioner i appen")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("""
+        - **Enskild match-prediktion:** Analysera en specifik match i detalj.
+        - **Flera matcher:** Tippa en hel omgång samtidigt.
+        - **Halvgarderingar:** Få förslag på vilka matcher som är mest osäkra.
+        """)
+    
+    with col2:
+        st.markdown("""
+        - **AI-analys (valfritt):** OpenAI-driven textanalys av matchen.
+        - **On-demand data-uppdatering:** Hämta färsk skadedata med en knapptryckning.
+        - **Automatisk omträning:** Träna om modellen med den senaste datan.
+        """)
+    
+    st.divider()
+    
+    st.subheader("🚀 Framtida förbättringsmöjligheter")
+    
+    st.markdown("För att ytterligare förbättra noggrannheten finns flera spännande möjligheter:")
+    
+    improvements_data = {
+        "Förbättring": ["Tränarbyte", "Spelarbetyg", "Vilodagar", "Väder", "Historisk skadedata", "Live-odds", "Avancerad H2H"],
+        "Beskrivning": [
+            "Implementera 'new manager bounce'-effekten.",
+            "Använd individuell spelarform istället för bara lagform.",
+            "Analysera hur tätt matchschema påverkar prestation.",
+            "Ta hänsyn till väderförhållanden (regn, vind, etc.).",
+            "Träna modellen på historisk skadedata, inte bara aktuell.",
+            "Jämför modellens prediktioner med live-odds från spelbolag.",
+            "Analysera taktiska mönster i tidigare möten."
+        ],
+        "Potentiell påverkan": ["🔴 Hög", "🔴 Hög", "🟡 Medel", "🟡 Låg-Medel", "🔴 Hög", "🟡 Medel", "🟡 Medel"]
+    }
+    st.dataframe(improvements_data, use_container_width=True, hide_index=True)
+    
+    st.divider()
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📊 Teknisk Stack")
+        st.markdown("""
+        - **Frontend:** Streamlit
+        - **Backend:** Python
+        - **ML-modell:** XGBoost, scikit-learn
+        - **Datahantering:** pandas, numpy, pyarrow
+        - **API-integration:** requests, python-dotenv
+        - **Testning:** pytest, pytest-cov (46 tester)
+        - **Deployment:** Render, Docker
+        """)
+    
+    with col2:
+        st.subheader("🔧 Utveckling & Kvalitet")
+        st.markdown("""
+        Projektet följer moderna best practices:
+        - **Modulär arkitektur:** Lätt att underhålla och bygga ut.
+        - **Automatiserad testning:** 42 enhetstester och 4 integrationstester.
+        - **Prestandaoptimering:** 5-10x snabbare feature engineering.
+        - **CI/CD-redo:** Automatisk deployment via GitHub och Render.
+        - **Säkerhet:** API-nycklar hanteras via miljövariabler.
+        """)
+    
+    st.divider()
+    
+    st.subheader("📝 Version")
+    st.success("**v7.6.0** - 'Human Impact' Edition")
+    
+    st.subheader("🐛 Felsökning")
+    
+    st.markdown("""
+    Om du stöter på problem:
+    1. **Uppdatera skadedata:** Klicka "Uppdatera skador & form" i sidomenyn.
+    2. **Kör omträning:** Klicka "Kör omträning av modell".
+    3. **Kontrollera API-nyckel:** Verifiera att `API_FOOTBALL_KEY` är korrekt i Render.
+    4. **Se loggar:** Kolla loggarna i Render Dashboard för felmeddelanden.
+    """)
+    
+    st.divider()
+    
+    st.caption("Utvecklad av **Manus AI** på uppdrag av **Emtatos**.")
