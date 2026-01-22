@@ -355,17 +355,31 @@ with st.sidebar:
                     st.error(f"❌ Fel vid uppdatering: {e}")
                     logger.error(f"Injury update failed: {e}", exc_info=True)
     
-    if st.button("🔄 Kör omträning av modell", help="Kör hela pipelinen för att träna om modellen", use_container_width=True):
-        with st.spinner("Pipeline körs..."):
+    if st.button("🔄 Kör omträning av modell", help="Tränar om modellen med alla 27 features (inkl. skador)", use_container_width=True):
+        with st.spinner("🔄 Tränar modell med 27 features..."):
             try:
-                run_pipeline()
-                st.success("✅ Pipelinen är färdig!")
+                # Använd quick-fix för att träna med 27 features
+                from retrain_model_27features import retrain_with_injury_features
+                model_path = retrain_with_injury_features()
+                st.success(f"✅ Modell omtränad med 27 features!")
+                st.info(f"💾 Sparad som: {model_path.name}")
                 st.cache_resource.clear()
                 st.cache_data.clear()
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ Ett fel inträffade: {e}")
-                logger.error(f"Pipeline misslyckades: {e}", exc_info=True)
+                logger.error(f"Retrain failed: {e}", exc_info=True)
+                # Fallback till full pipeline
+                try:
+                    st.info("🔄 Försöker med full pipeline...")
+                    run_pipeline()
+                    st.success("✅ Pipelinen är färdig!")
+                    st.cache_resource.clear()
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e2:
+                    st.error(f"❌ Pipeline misslyckades också: {e2}")
+                    logger.error(f"Pipeline fallback failed: {e2}", exc_info=True)
 
 # ============================================================================
 # HUVUDINNEHÅLL
