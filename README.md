@@ -296,6 +296,22 @@ För frågor eller feedback, öppna en issue på GitHub.
 **Utvecklad med ❤️ av Emtatos**
 
 
+## Backtest Report
+
+Kör en walk-forward backtest för att utvärdera modellens prestanda:
+
+```bash
+python backtest_report.py
+```
+
+Detta genererar en rapport med:
+- **accuracy_top1**: Top-1 accuracy (argmax-prediktion)
+- **accuracy_top2_on_halfguards**: Top-2 accuracy på entropy-valda halvgarderingar
+- **combined_ticket_hit_rate**: Kombinerad träffprocent (top1 + top2 för HG)
+- **logloss**: Multiclass log loss
+- **brier**: Multiclass Brier score
+- Per-liga breakdown för accuracy och logloss
+
 ## Training vs Inference Contract
 
 - `schema.py` innehåller `FEATURE_COLUMNS` som är **single source of truth**.
