@@ -6,8 +6,9 @@ import logging
 from typing import Optional, Tuple
 
 from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, log_loss
+
+from schema import CLASS_MAP, FEATURE_COLUMNS, encode_league
 import inspect
 
 # Konfigurera logger för modulen
@@ -82,33 +83,41 @@ def train_and_save_model(
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1) Features & mål (inkludera alla features inkl. H2H, position och skador)
-        feature_cols = [
-            'HomeFormPts', 'HomeFormGD', 'AwayFormPts', 'AwayFormGD',
-            'HomeFormHome', 'AwayFormAway',
-            'HomeGoalsFor', 'HomeGoalsAgainst', 'AwayGoalsFor', 'AwayGoalsAgainst',
-            'HomeStreak', 'AwayStreak',
-            'H2H_HomeWins', 'H2H_Draws', 'H2H_AwayWins', 'H2H_HomeGoalDiff',
-            'HomePosition', 'AwayPosition', 'PositionDiff',
-            'HomeElo', 'AwayElo'
-        ]
-        
-        # Lägg till skade-features om de finns
-        injury_features = ['InjuredPlayers_Home', 'InjuredPlayers_Away', 
-                          'KeyPlayersOut_Home', 'KeyPlayersOut_Away',
-                          'InjurySeverity_Home', 'InjurySeverity_Away']
-        for feature in injury_features:
-            if feature in df_features.columns:
-                feature_cols.append(feature)
-        
-        logging.info(f"Tränar modell med {len(feature_cols)} features: {feature_cols}")
-        X = df_features[feature_cols]
-        y = df_features["FTR"].map({"H": 0, "D": 1, "A": 2})
+        # 1) Features & mål (single source of truth via schema.py)
+        df_local = df_features.copy()
 
-        # 2) Train/val-split
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
+        # League: säkerställ numeriskt
+        if "League" in df_local.columns:
+            df_local["League"] = df_local["League"].apply(encode_league)
+
+        # Säkerställ att alla features finns (fyll annars med 0)
+        missing = [c for c in FEATURE_COLUMNS if c not in df_local.columns]
+        if missing:
+            raise ValueError(f"Missing features: {missing}")
+
+        X = df_local[FEATURE_COLUMNS]
+        y = df_local["FTR"].map(CLASS_MAP)
+
+        # 2) Tidsbaserad train/val-split (undvik dataläckage)
+        if "Date" in df_local.columns:
+            df_local["Date"] = pd.to_datetime(df_local["Date"], errors="coerce")
+            df_local = df_local.dropna(subset=["Date"]).sort_values("Date", ascending=True)
+            split_point = df_local["Date"].quantile(0.8)
+            train_df = df_local[df_local["Date"] <= split_point]
+            val_df = df_local[df_local["Date"] > split_point]
+            if len(val_df) == 0 or len(train_df) == 0:
+                # Fallback om quantile ger tomt
+                cut = int(len(df_local) * 0.8)
+                train_df = df_local.iloc[:cut]
+                val_df = df_local.iloc[cut:]
+            X_train, y_train = train_df[FEATURE_COLUMNS], train_df["FTR"].map(CLASS_MAP)
+            X_val, y_val = val_df[FEATURE_COLUMNS], val_df["FTR"].map(CLASS_MAP)
+        else:
+            # Fallback: enkel split på index
+            cut = int(len(df_local) * 0.8)
+            X_train, y_train = X.iloc[:cut], y.iloc[:cut]
+            X_val, y_val = X.iloc[cut:], y.iloc[cut:]
+
         logging.info("Träningsdata: %d rader. Valideringsdata: %d rader.", len(X_train), len(X_val))
 
         # 3) Initiera och träna modell (kompatibel)
@@ -120,7 +129,12 @@ def train_and_save_model(
         # 4) Utvärdera
         preds = model.predict(X_val)
         accuracy = accuracy_score(y_val, preds)
+        try:
+            ll = log_loss(y_val, model.predict_proba(X_val), labels=[0,1,2])
+        except Exception:
+            ll = float('nan')
         logging.info("Modellens träffsäkerhet på valideringsdata: %.2f%%", accuracy * 100)
+        logging.info("Modellens logloss på valideringsdata: %s", f"{ll:.4f}" if ll==ll else "N/A")
 
         # 5) Spara
         joblib.dump(model, model_path)

@@ -328,6 +328,15 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     if INJURY_FEATURES_AVAILABLE:
         logger.info("Lägger till skade-features...")
         df_final = _add_injury_features(df_final)
+
+    # Säkerställ stabilt feature-kontrakt även om injury_scraper saknas
+    for c, default in [
+        ("InjuredPlayers_Home", 0), ("InjuredPlayers_Away", 0),
+        ("KeyPlayersOut_Home", 0), ("KeyPlayersOut_Away", 0),
+        ("InjurySeverity_Home", 0.0), ("InjurySeverity_Away", 0.0),
+    ]:
+        if c not in df_final.columns:
+            df_final[c] = default
     
     added_cols = [c for c in df_final.columns if c not in df.columns]
     logger.info(f"Feature engineering slutförd. Nya kolumner ({len(added_cols)}): {added_cols}")
