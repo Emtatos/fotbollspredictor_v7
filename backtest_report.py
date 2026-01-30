@@ -28,6 +28,7 @@ from feature_engineering import create_features
 from model_handler import _init_xgb_classifier, _fit_with_optional_early_stopping
 from schema import FEATURE_COLUMNS, CLASS_MAP, encode_league
 from uncertainty import entropy_norm
+from trust import compute_trust_features, trust_score
 
 logging.basicConfig(
     level=logging.INFO,
@@ -133,6 +134,93 @@ def predict_with_entropy(
 def get_top2_predictions(y_proba: np.ndarray) -> np.ndarray:
     """Get top-2 predictions for each sample."""
     return np.argsort(y_proba, axis=1)[:, -2:]
+
+
+def compute_trust_scores_for_df(df_test: pd.DataFrame, df_train: pd.DataFrame) -> List[Tuple[int, str]]:
+    """
+    Compute trust scores for each match in df_test based on df_train history.
+    
+    Returns list of (score, label) tuples for each match in df_test.
+    """
+    from collections import defaultdict
+    
+    matches_played = defaultdict(int)
+    h2h_counts = defaultdict(lambda: {"home_wins": 0, "draws": 0, "away_wins": 0})
+    
+    for _, row in df_train.iterrows():
+        ht = row["HomeTeam"]
+        at = row["AwayTeam"]
+        ftr = row.get("FTR")
+        
+        matches_played[ht] += 1
+        matches_played[at] += 1
+        
+        matchup = tuple(sorted([ht, at]))
+        if ftr == "H":
+            if ht == min(ht, at):
+                h2h_counts[matchup]["home_wins"] += 1
+            else:
+                h2h_counts[matchup]["away_wins"] += 1
+        elif ftr == "A":
+            if at == min(ht, at):
+                h2h_counts[matchup]["home_wins"] += 1
+            else:
+                h2h_counts[matchup]["away_wins"] += 1
+        elif ftr == "D":
+            h2h_counts[matchup]["draws"] += 1
+    
+    trust_results = []
+    
+    for _, row in df_test.iterrows():
+        ht = row["HomeTeam"]
+        at = row["AwayTeam"]
+        league_code = encode_league(row.get("League")) if "League" in df_test.columns else -1
+        
+        history_n_home = matches_played.get(ht, 0)
+        history_n_away = matches_played.get(at, 0)
+        
+        matchup = tuple(sorted([ht, at]))
+        h2h_data = h2h_counts.get(matchup, {"home_wins": 0, "draws": 0, "away_wins": 0})
+        
+        if ht == min(ht, at):
+            h2h_hw = h2h_data["home_wins"]
+            h2h_aw = h2h_data["away_wins"]
+        else:
+            h2h_hw = h2h_data["away_wins"]
+            h2h_aw = h2h_data["home_wins"]
+        h2h_d = h2h_data["draws"]
+        
+        home_state = {"MatchesPlayed": history_n_home}
+        away_state = {"MatchesPlayed": history_n_away}
+        
+        trust_features = compute_trust_features(
+            home_state=home_state,
+            away_state=away_state,
+            h2h_home_wins=h2h_hw,
+            h2h_draws=h2h_d,
+            h2h_away_wins=h2h_aw,
+            league_code=league_code,
+        )
+        score, label = trust_score(trust_features)
+        trust_results.append((score, label))
+        
+        matches_played[ht] += 1
+        matches_played[at] += 1
+        
+        if row.get("FTR") == "H":
+            if ht == min(ht, at):
+                h2h_counts[matchup]["home_wins"] += 1
+            else:
+                h2h_counts[matchup]["away_wins"] += 1
+        elif row.get("FTR") == "A":
+            if at == min(ht, at):
+                h2h_counts[matchup]["home_wins"] += 1
+            else:
+                h2h_counts[matchup]["away_wins"] += 1
+        elif row.get("FTR") == "D":
+            h2h_counts[matchup]["draws"] += 1
+    
+    return trust_results
 
 
 def compute_block_metrics(
@@ -349,15 +437,18 @@ def load_data(refresh: bool = False) -> pd.DataFrame:
     return load_data_from_cache()
 
 
-def run_backtest(df: pd.DataFrame, n_folds: int = 3) -> List[Dict]:
+def run_backtest(df: pd.DataFrame, n_folds: int = 3) -> Tuple[List[Dict], Dict]:
     """
     Run walk-forward backtest with time-based splits.
     
     Uses tertiles (3 segments) by default for faster CI.
+    
+    Returns:
+        Tuple of (all_metrics, high_trust_metrics)
     """
     if df.empty:
         logger.error("Empty dataframe for backtest")
-        return []
+        return [], {}
     
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -367,6 +458,10 @@ def run_backtest(df: pd.DataFrame, n_folds: int = 3) -> List[Dict]:
     df["time_fold"] = pd.qcut(df["Date"], q=n_folds, labels=False, duplicates='drop')
     
     all_metrics = []
+    
+    all_y_true_high = []
+    all_y_proba_high = []
+    all_pred_top1_high = []
     
     for fold_idx in range(1, n_folds):
         train_mask = df["time_fold"] < fold_idx
@@ -390,6 +485,9 @@ def run_backtest(df: pd.DataFrame, n_folds: int = 3) -> List[Dict]:
         
         y_true, y_proba, pred_top1, entropy_values = predict_with_entropy(model, df_test)
         
+        # Compute trust scores for each match in test set
+        trust_results = compute_trust_scores_for_df(df_test, df_train)
+        
         # Get league codes for per-league metrics
         league_codes = df_test["League"].apply(encode_league).values if "League" in df_test.columns else None
         
@@ -399,12 +497,48 @@ def run_backtest(df: pd.DataFrame, n_folds: int = 3) -> List[Dict]:
             league_codes=league_codes
         )
         metrics['fold'] = fold_idx
+        
+        # Count trust labels
+        high_count = sum(1 for _, label in trust_results if label == "HIGH")
+        med_count = sum(1 for _, label in trust_results if label == "MED")
+        low_count = sum(1 for _, label in trust_results if label == "LOW")
+        metrics['trust_high_count'] = high_count
+        metrics['trust_med_count'] = med_count
+        metrics['trust_low_count'] = low_count
+        
         all_metrics.append(metrics)
+        
+        # Collect HIGH trust subset data
+        for i, (score, label) in enumerate(trust_results):
+            if label == "HIGH":
+                all_y_true_high.append(y_true[i])
+                all_y_proba_high.append(y_proba[i])
+                all_pred_top1_high.append(pred_top1[i])
     
-    return all_metrics
+    # Compute HIGH trust subset metrics
+    high_trust_metrics = {}
+    if all_y_true_high:
+        y_true_high = np.array(all_y_true_high)
+        y_proba_high = np.array(all_y_proba_high)
+        pred_top1_high = np.array(all_pred_top1_high)
+        
+        high_trust_metrics['n'] = len(y_true_high)
+        high_trust_metrics['accuracy_top1'] = accuracy_score(y_true_high, pred_top1_high)
+        
+        # Combined ticket hit rate (no half-guards for this subset)
+        high_trust_metrics['combined'] = high_trust_metrics['accuracy_top1']
+        
+        try:
+            high_trust_metrics['logloss'] = log_loss(y_true_high, y_proba_high, labels=[0, 1, 2])
+        except Exception:
+            high_trust_metrics['logloss'] = float('nan')
+        
+        high_trust_metrics['brier'] = compute_brier_score_multiclass(y_true_high, y_proba_high)
+    
+    return all_metrics, high_trust_metrics
 
 
-def print_report(all_metrics: List[Dict]) -> None:
+def print_report(all_metrics: List[Dict], high_trust_metrics: Optional[Dict] = None) -> None:
     """Print a formatted backtest report."""
     if not all_metrics:
         print("\n" + "=" * 60)
@@ -439,6 +573,25 @@ def print_report(all_metrics: List[Dict]) -> None:
           f"{avg_acc_top2_hg:<12.4f} {avg_combined:<10.4f} "
           f"{avg_logloss:<10.4f} {avg_brier:<10.4f}")
     
+    # Trust distribution
+    print("\n--- Trust Score Distribution ---\n")
+    total_high = sum(m.get('trust_high_count', 0) for m in all_metrics)
+    total_med = sum(m.get('trust_med_count', 0) for m in all_metrics)
+    total_low = sum(m.get('trust_low_count', 0) for m in all_metrics)
+    print(f"HIGH: {total_high}  |  MED: {total_med}  |  LOW: {total_low}")
+    
+    # HIGH trust subset metrics
+    if high_trust_metrics and high_trust_metrics.get('n', 0) > 0:
+        print("\n--- TOTAL (HIGH TRUST ONLY) ---\n")
+        print(f"{'N':<6} {'Acc_Top1':<10} {'Combined':<10} {'LogLoss':<10} {'Brier':<10}")
+        print("-" * 50)
+        n = high_trust_metrics['n']
+        acc = high_trust_metrics.get('accuracy_top1', 0)
+        comb = high_trust_metrics.get('combined', 0)
+        ll = high_trust_metrics.get('logloss', float('nan'))
+        brier = high_trust_metrics.get('brier', 0)
+        print(f"{n:<6} {acc:<10.4f} {comb:<10.4f} {ll:<10.4f} {brier:<10.4f}")
+    
     # Per-league breakdown
     print("\n--- Per-League Breakdown (Average across folds) ---\n")
     
@@ -467,6 +620,7 @@ def print_report(all_metrics: List[Dict]) -> None:
     print("  LogLoss       = Multiclass log loss")
     print("  Brier         = Multiclass Brier score")
     print(f"  N_HALF        = {N_HALF} matches per fold selected as half-guards")
+    print("  Trust         = Data coverage score (HIGH >= 70, MED 40-69, LOW < 40)")
     print("=" * 60 + "\n")
 
 
@@ -512,9 +666,9 @@ def main() -> int:
     
     logger.info("Loaded %d matches", len(df))
     
-    all_metrics = run_backtest(df, n_folds=3)
+    all_metrics, high_trust_metrics = run_backtest(df, n_folds=3)
     
-    print_report(all_metrics)
+    print_report(all_metrics, high_trust_metrics)
     
     if not all_metrics:
         return 1

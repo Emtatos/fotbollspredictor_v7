@@ -18,6 +18,7 @@ from backtest_report import (
     check_cache_exists,
     get_cache_filename,
     load_data,
+    compute_trust_scores_for_df,
     CACHE_DIR,
     LEAGUES,
 )
@@ -338,3 +339,96 @@ class TestCacheBehavior:
         assert hasattr(backtest_report, 'load_data_from_cache')
         assert hasattr(backtest_report, 'CACHE_DIR')
         assert hasattr(backtest_report, 'parse_args')
+
+
+class TestTrustScoreBacktest:
+    """Tests for trust score integration in backtest."""
+
+    def test_compute_trust_scores_for_df(self):
+        """Test that trust scores are computed for each match."""
+        df_train = pd.DataFrame({
+            'HomeTeam': ['TeamA', 'TeamB', 'TeamC', 'TeamA', 'TeamB'] * 4,
+            'AwayTeam': ['TeamB', 'TeamC', 'TeamA', 'TeamC', 'TeamA'] * 4,
+            'FTR': ['H', 'D', 'A', 'H', 'D'] * 4,
+            'League': ['E0'] * 20,
+        })
+        
+        df_test = pd.DataFrame({
+            'HomeTeam': ['TeamA', 'TeamB'],
+            'AwayTeam': ['TeamB', 'TeamC'],
+            'FTR': ['H', 'D'],
+            'League': ['E0', 'E0'],
+        })
+        
+        trust_results = compute_trust_scores_for_df(df_test, df_train)
+        
+        assert len(trust_results) == 2
+        for score, label in trust_results:
+            assert isinstance(score, int)
+            assert 0 <= score <= 100
+            assert label in ['HIGH', 'MED', 'LOW']
+
+    def test_compute_trust_scores_empty_train(self):
+        """Test trust scores with empty training data."""
+        df_train = pd.DataFrame({
+            'HomeTeam': [],
+            'AwayTeam': [],
+            'FTR': [],
+            'League': [],
+        })
+        
+        df_test = pd.DataFrame({
+            'HomeTeam': ['TeamA'],
+            'AwayTeam': ['TeamB'],
+            'FTR': ['H'],
+            'League': ['E0'],
+        })
+        
+        trust_results = compute_trust_scores_for_df(df_test, df_train)
+        
+        assert len(trust_results) == 1
+        score, label = trust_results[0]
+        assert score < 40
+        assert label == 'LOW'
+
+    def test_print_report_with_high_trust_metrics(self, capsys):
+        """Test that print_report outputs HIGH TRUST section."""
+        from backtest_report import print_report
+        
+        mock_metrics = [
+            {
+                'fold': 1,
+                'n_matches': 100,
+                'accuracy_top1': 0.45,
+                'accuracy_top2_on_halfguards': 0.75,
+                'combined_ticket_hit_rate': 0.52,
+                'logloss': 1.05,
+                'brier': 0.65,
+                'trust_high_count': 60,
+                'trust_med_count': 30,
+                'trust_low_count': 10,
+            },
+        ]
+        
+        high_trust_metrics = {
+            'n': 60,
+            'accuracy_top1': 0.50,
+            'combined': 0.50,
+            'logloss': 1.00,
+            'brier': 0.60,
+        }
+        
+        print_report(mock_metrics, high_trust_metrics)
+        
+        captured = capsys.readouterr()
+        
+        assert 'HIGH TRUST ONLY' in captured.out
+        assert 'Trust Score Distribution' in captured.out
+        assert 'HIGH: 60' in captured.out
+
+    def test_run_backtest_returns_high_trust_metrics(self):
+        """Test that run_backtest returns high_trust_metrics dict."""
+        import backtest_report
+        
+        assert hasattr(backtest_report, 'run_backtest')
+        assert hasattr(backtest_report, 'compute_trust_scores_for_df')
