@@ -5,6 +5,7 @@ import numpy as np
 
 # Importeras från utils.py, som vi vet fungerar
 from utils import normalize_team_name
+from uncertainty import entropy_norm
 
 def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
     """
@@ -42,10 +43,10 @@ def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
 
 def pick_half_guards(match_probs: List[Optional[np.ndarray]], n_guards: int) -> List[int]:
     """
-    Väljer ut de mest osäkra matcherna för halvgardering.
+    Väljer ut de mest osäkra matcherna för halvgardering baserat på entropy.
 
-    Strategi: Välj matcher där skillnaden mellan bästa och näst bästa utfall är minst.
-    Matcher som saknar data (None) får högsta prioritet för gardering.
+    Strategi: Välj matcher med högst entropy (osäkerhet över hela 1/X/2-fördelningen).
+    Matcher som saknar data (None) får högsta prioritet för gardering (entropy = 2.0).
 
     Returnerar en lista med index för de matcher som ska halvgarderas.
     """
@@ -55,21 +56,35 @@ def pick_half_guards(match_probs: List[Optional[np.ndarray]], n_guards: int) -> 
     scored_matches = []
     for i, probs in enumerate(match_probs):
         if probs is None:
-            # Ge matcher utan data högsta prioritet (simulera en marginal på -1)
-            margin = -1.0 
+            # Ge matcher utan data högsta prioritet (entropy > 1.0)
+            entropy = 2.0
         else:
-            # Sortera sannolikheterna och beräkna marginalen
-            sorted_probs = sorted(probs, reverse=True)
-            margin = sorted_probs[0] - sorted_probs[1]
+            # Beräkna normaliserad entropy för sannolikhetsfördelningen
+            entropy = entropy_norm(probs[0], probs[1], probs[2])
         
-        scored_matches.append({'margin': margin, 'index': i})
+        scored_matches.append({'entropy': entropy, 'index': i})
 
-    # Sortera efter marginal (lägst först, dvs. osäkrast först)
-    scored_matches.sort(key=lambda x: x['margin'])
+    # Sortera efter entropy (högst först, dvs. mest osäker först)
+    scored_matches.sort(key=lambda x: x['entropy'], reverse=True)
     
     # Välj ut de n_guards bästa indexen
     guard_indices = [match['index'] for match in scored_matches[:n_guards]]
     return guard_indices
+
+
+def calculate_match_entropy(probs: Optional[np.ndarray]) -> Optional[float]:
+    """
+    Beräknar entropy för en match.
+
+    Args:
+        probs: Sannolikheter [1, X, 2] eller None
+
+    Returns:
+        Normaliserad entropy (0-1) eller None om probs är None
+    """
+    if probs is None:
+        return None
+    return entropy_norm(probs[0], probs[1], probs[2])
 
 
 def get_halfguard_sign(probs: np.ndarray) -> str:
