@@ -29,7 +29,7 @@ class TestNormalizeCSVData:
         
         # Verifiera resultat
         assert len(df) == 3
-        assert list(df.columns) == ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"]
+        assert list(df.columns) == ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR", "League"]
         assert df["FTHG"].dtype == np.int64
         assert df["FTAG"].dtype == np.int64
         assert pd.api.types.is_datetime64_any_dtype(df["Date"])

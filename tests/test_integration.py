@@ -15,6 +15,7 @@ from main import run_pipeline, get_current_season_code
 from model_handler import load_model
 from feature_engineering import create_features
 from data_processing import normalize_csv_data
+from schema import FEATURE_COLUMNS, encode_league
 
 
 class TestFullPipeline:
@@ -150,7 +151,8 @@ class TestFullPipeline:
                 "AwayTeam": away,
                 "FTHG": fthg,
                 "FTAG": ftag,
-                "FTR": ftr
+                "FTR": ftr,
+                "League": "E0"
             })
         
         df = pd.DataFrame(data)
@@ -175,18 +177,11 @@ class TestFullPipeline:
             loaded_model = load_model(model_path)
             assert loaded_model is not None
             
-            # Gör en prediktion
-            feature_cols = [
-                'HomeFormPts', 'HomeFormGD', 'AwayFormPts', 'AwayFormGD',
-                'HomeFormHome', 'AwayFormAway',
-                'HomeGoalsFor', 'HomeGoalsAgainst', 'AwayGoalsFor', 'AwayGoalsAgainst',
-                'HomeStreak', 'AwayStreak',
-                'H2H_HomeWins', 'H2H_Draws', 'H2H_AwayWins', 'H2H_HomeGoalDiff',
-                'HomePosition', 'AwayPosition', 'PositionDiff',
-                'HomeElo', 'AwayElo'
-            ]
-            
-            X_test = df_features[feature_cols].iloc[-1:].values
+            # Gör en prediktion med samma features som modellen tränades med
+            # Encode League column to numeric (same as during training)
+            df_pred = df_features.copy()
+            df_pred["League"] = df_pred["League"].apply(encode_league)
+            X_test = df_pred[FEATURE_COLUMNS].iloc[-1:].values
             probs = loaded_model.predict_proba(X_test)[0]
             
             # Verifiera att sannolikheterna är giltiga
@@ -225,14 +220,23 @@ class TestEndToEnd:
     
     def test_prediction_workflow(self):
         """Testar hela flödet från data till prediktion"""
-        # Skapa minimal dataset
+        # Skapa minimal dataset med alla tre resultattyper (H, D, A)
+        # för att XGBoost ska kunna träna en multi-class classifier
+        dates = pd.date_range("2024-01-01", periods=30, freq="D")
+        home_teams = ["Arsenal"] * 10 + ["Chelsea"] * 10 + ["Liverpool"] * 10
+        away_teams = ["Chelsea"] * 10 + ["Liverpool"] * 10 + ["Arsenal"] * 10
+        fthg = [2, 1, 3, 2, 1, 2, 0, 2, 1, 2] * 3
+        ftag = [1, 1, 0, 2, 1, 0, 2, 1, 1, 0] * 3
+        ftr = ["H", "D", "H", "A", "D", "H", "A", "H", "D", "H"] * 3
+        
         data = {
-            "Date": pd.date_range("2024-01-01", periods=30, freq="D"),
-            "HomeTeam": ["Arsenal"] * 15 + ["Chelsea"] * 15,
-            "AwayTeam": ["Chelsea"] * 15 + ["Arsenal"] * 15,
-            "FTHG": [2] * 30,
-            "FTAG": [1] * 30,
-            "FTR": ["H"] * 30
+            "Date": dates,
+            "HomeTeam": home_teams,
+            "AwayTeam": away_teams,
+            "FTHG": fthg,
+            "FTAG": ftag,
+            "FTR": ftr,
+            "League": ["E0"] * 30
         }
         df = pd.DataFrame(data)
         
@@ -247,18 +251,11 @@ class TestEndToEnd:
             model = train_and_save_model(df_features, model_path)
             assert model is not None
             
-            # 3. Gör prediktion (simulera app.py-logik)
-            feature_cols = [
-                'HomeFormPts', 'HomeFormGD', 'AwayFormPts', 'AwayFormGD',
-                'HomeFormHome', 'AwayFormAway',
-                'HomeGoalsFor', 'HomeGoalsAgainst', 'AwayGoalsFor', 'AwayGoalsAgainst',
-                'HomeStreak', 'AwayStreak',
-                'H2H_HomeWins', 'H2H_Draws', 'H2H_AwayWins', 'H2H_HomeGoalDiff',
-                'HomePosition', 'AwayPosition', 'PositionDiff',
-                'HomeElo', 'AwayElo'
-            ]
-            
-            X = df_features[feature_cols].iloc[-1:].values
+            # 3. Gör prediktion med samma features som modellen tränades med
+            # Encode League column to numeric (same as during training)
+            df_pred = df_features.copy()
+            df_pred["League"] = df_pred["League"].apply(encode_league)
+            X = df_pred[FEATURE_COLUMNS].iloc[-1:].values
             probs = model.predict_proba(X)[0]
             prediction = model.predict(X)[0]
             
