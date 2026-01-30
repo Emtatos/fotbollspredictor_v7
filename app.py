@@ -28,6 +28,7 @@ from state import build_current_team_states
 from features import compute_h2h
 from inference import build_feature_row, predict_match as infer_predict_match
 from schema import FEATURE_COLUMNS
+from trust import compute_trust_features, trust_score
 
 
 # News scraper för AI-analys
@@ -179,6 +180,17 @@ def predict_match(
 
     h2h_hw, h2h_d, h2h_aw, h2h_gd = compute_h2h(hist, home_team_n, away_team_n)
 
+    # Compute trust score
+    trust_features = compute_trust_features(
+        home_state=hs,
+        away_state=as_,
+        h2h_home_wins=h2h_hw,
+        h2h_draws=h2h_d,
+        h2h_away_wins=h2h_aw,
+        league_code=hs.get("League", -1),
+    )
+    trust_score_val, trust_label = trust_score(trust_features)
+
     # Injury features (default 0; uppdateras om scraper finns)
     injury_features = {
         "InjuredPlayers_Home": 0,
@@ -233,6 +245,8 @@ def predict_match(
         "away_elo": as_["Elo"],
         "home_goals_for": hs["GoalsFor"],
         "away_goals_for": as_["GoalsFor"],
+        "trust_score": trust_score_val,
+        "trust_label": trust_label,
     }
 
     return probs, stats
@@ -486,12 +500,18 @@ with tab1:
                 # Visa resultat
                 st.subheader("📊 Resultat")
                 
+                trust_display = stats.get('trust_label', 'N/A')
+                if trust_display == "LOW":
+                    trust_display = "LOW (varning)"
+                
                 result_data = {
                     "Match": f"{home_team_selection} - {away_team_selection}",
                     "1 (Hemma)": f"{probs[0]:.1%}",
                     "X (Oavgjort)": f"{probs[1]:.1%}",
                     "2 (Borta)": f"{probs[2]:.1%}",
                     "Tips": sign,
+                    "Trust": trust_display,
+                    "TrustScore": stats.get('trust_score', 0),
                     "ELO-skillnad": f"{(stats['home_elo'] - stats['away_elo']):+.0f}",
                     "Form-skillnad": f"{(stats['home_form_pts'] - stats['away_form_pts']):+.1f}"
                 }
@@ -577,6 +597,7 @@ with tab2:
                             "X": "N/A",
                             "2": "N/A",
                             "Entropy": "N/A",
+                            "Trust": "N/A",
                             "Tips": "?",
                             "HALV": ""
                         })
@@ -587,6 +608,9 @@ with tab2:
                         
                         sign = ['1', 'X', '2'][np.argmax(probs)]
                         entropy = calculate_match_entropy(probs)
+                        trust_lbl = stats.get('trust_label', 'N/A')
+                        if trust_lbl == "LOW":
+                            trust_lbl = "LOW (varning)"
                         
                         results.append({
                             "Match": f"{home} - {away}",
@@ -594,6 +618,7 @@ with tab2:
                             "X": f"{probs[1]:.1%}",
                             "2": f"{probs[2]:.1%}",
                             "Entropy": f"{entropy:.2f}" if entropy is not None else "N/A",
+                            "Trust": trust_lbl,
                             "Tips": sign,
                             "HALV": ""
                         })

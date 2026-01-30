@@ -46,6 +46,9 @@ def build_current_team_states(df_history: pd.DataFrame, k_factor: int = 20) -> D
     elo = defaultdict(lambda: 1500.0)
     streak = defaultdict(int)
 
+    # Matches played counter per team (for trust score)
+    matches_played = defaultdict(int)
+
     # Tabellstatistik (poäng + gd)
     # per league_code (int) -> team -> stats
     table = defaultdict(lambda: defaultdict(lambda: {"points": 0, "gd": 0, "games": 0}))
@@ -115,6 +118,10 @@ def build_current_team_states(df_history: pd.DataFrame, k_factor: int = 20) -> D
         _update_streak(ht, hp)
         _update_streak(at, ap)
 
+        # Update matches played counter
+        matches_played[ht] += 1
+        matches_played[at] += 1
+
         # table update (points+gd)
         t = table[league_code]
         if ftr == "H":
@@ -157,5 +164,6 @@ def build_current_team_states(df_history: pd.DataFrame, k_factor: int = 20) -> D
             "Elo": float(elo[team]),
             "Position": int(positions.get((league_code, team), 0)),
             "League": int(league_code),
+            "MatchesPlayed": int(matches_played[team]),
         }
     return states
