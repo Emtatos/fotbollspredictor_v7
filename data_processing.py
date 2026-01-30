@@ -21,6 +21,13 @@ def normalize_csv_data(file_paths: list[Path]) -> pd.DataFrame:
     all_dfs = []
     required_cols = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"]
 
+    def _extract_league_code(p: Path) -> str:
+        # Förväntat filnamn: <LEAGUE>_<SEASON>.csv (t.ex. E0_2425.csv)
+        stem = p.stem
+        league = stem.split("_")[0].strip()
+        return league if league else "UNK"
+
+
     for file_path in file_paths:
         try:
             df = pd.read_csv(file_path, encoding='latin1', on_bad_lines='warn')
@@ -30,7 +37,9 @@ def normalize_csv_data(file_paths: list[Path]) -> pd.DataFrame:
                 logging.warning("Filen %s saknar en eller flera nödvändiga kolumner. Hoppar över.", file_path)
                 continue
 
-            all_dfs.append(df[required_cols])
+            df = df.copy()
+            df["League"] = _extract_league_code(Path(file_path))
+            all_dfs.append(df[required_cols + ["League"]])
 
         except Exception as e:
             logging.error("Kunde inte läsa eller bearbeta filen %s: %s", file_path, e)

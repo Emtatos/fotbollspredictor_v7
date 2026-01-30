@@ -294,3 +294,10 @@ För frågor eller feedback, öppna en issue på GitHub.
 ---
 
 **Utvecklad med ❤️ av Emtatos**
+
+
+## Training vs Inference Contract
+
+- `schema.py` innehåller `FEATURE_COLUMNS` som är **single source of truth**.
+- Alla prediktioner ska gå via `inference.predict_match()`.
+- `state.build_current_team_states()` används för att ta fram aktuellt lagläge (inte senaste matchrad).

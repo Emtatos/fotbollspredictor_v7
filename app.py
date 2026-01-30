@@ -23,6 +23,13 @@ from xgboost import XGBClassifier
 from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input
 from utils import normalize_team_name, set_canonical_teams, get_canonical_teams
 
+# Konsistenta inference-moduler
+from state import build_current_team_states
+from features import compute_h2h
+from inference import build_feature_row, predict_match as infer_predict_match
+from schema import FEATURE_COLUMNS
+
+
 # News scraper för AI-analys
 try:
     from news_scraper_v2 import get_match_context, IntelligentFootballAnalyzer
@@ -104,28 +111,32 @@ def get_team_snapshot(team_name: str, df: pd.DataFrame) -> Optional[pd.Series]:
 
 
 def get_team_features(team_name: str, snapshot: pd.Series, df: pd.DataFrame) -> dict:
-    """Extraherar alla features för ett lag från snapshot"""
+    """Extraherar alla features för ett lag från snapshot (legacy).
+
+    OBS: Denna funktion används inte längre för prediktion (vi använder state replay),
+    men behålls för kompatibilitet med övrig UI-kod.
+    """
     if snapshot['HomeTeam'] == team_name:
         return {
-            'FormPts': snapshot['HomeFormPts'],
-            'FormGD': snapshot['HomeFormGD'],
-            'FormHome': snapshot['HomeFormHome'],
-            'GoalsFor': snapshot['HomeGoalsFor'],
-            'GoalsAgainst': snapshot['HomeGoalsAgainst'],
-            'Streak': snapshot['HomeStreak'],
-            'Position': snapshot['HomePosition'],
-            'Elo': snapshot['HomeElo']
+            'FormPts': snapshot.get('HomeFormPts', 0),
+            'FormGD': snapshot.get('HomeFormGD', 0),
+            'FormHome': snapshot.get('HomeFormHome', 0),
+            'GoalsFor': snapshot.get('HomeGoalsFor', 0),
+            'GoalsAgainst': snapshot.get('HomeGoalsAgainst', 0),
+            'Streak': snapshot.get('HomeStreak', 0),
+            'Position': snapshot.get('HomePosition', 0),
+            'Elo': snapshot.get('HomeElo', 1500),
         }
     else:
         return {
-            'FormPts': snapshot['AwayFormPts'],
-            'FormGD': snapshot['AwayFormGD'],
-            'FormHome': snapshot['AwayFormAway'],
-            'GoalsFor': snapshot['AwayGoalsFor'],
-            'GoalsAgainst': snapshot['AwayGoalsAgainst'],
-            'Streak': snapshot['AwayStreak'],
-            'Position': snapshot['AwayPosition'],
-            'Elo': snapshot['AwayElo']
+            'FormPts': snapshot.get('AwayFormPts', 0),
+            'FormGD': snapshot.get('AwayFormGD', 0),
+            'FormHome': snapshot.get('AwayFormAway', 0),
+            'GoalsFor': snapshot.get('AwayGoalsFor', 0),
+            'GoalsAgainst': snapshot.get('AwayGoalsAgainst', 0),
+            'Streak': snapshot.get('AwayStreak', 0),
+            'Position': snapshot.get('AwayPosition', 0),
+            'Elo': snapshot.get('AwayElo', 1500),
         }
 
 
@@ -136,82 +147,94 @@ def predict_match(
     df_features: pd.DataFrame
 ) -> Optional[Tuple[np.ndarray, dict]]:
     """
-    Gör en prediktion för en match
-    
-    Returns:
-        Tuple med (sannolikheter, statistik) eller None om data saknas
+    Gör en prediktion för en match med konsekvent feature-kontrakt.
+
+    Fixar:
+      - använder current state (replay) i stället för senaste matchrad
+      - räknar H2H för rätt lagpar
+      - garanterar att predict_proba tolkas som [1, X, 2]
     """
-    home_stats = get_team_snapshot(home_team, df_features)
-    away_stats = get_team_snapshot(away_team, df_features)
-    
-    if home_stats is None or away_stats is None:
+    if df_features is None or df_features.empty:
         return None
-    
-    home_features = get_team_features(home_team, home_stats, df_features)
-    away_features = get_team_features(away_team, away_stats, df_features)
-    
-    # Beräkna H2H features från snapshot
-    h2h_home_wins = home_stats.get('H2H_HomeWins', 0)
-    h2h_draws = home_stats.get('H2H_Draws', 0)
-    h2h_away_wins = home_stats.get('H2H_AwayWins', 0)
-    h2h_home_goal_diff = home_stats.get('H2H_HomeGoalDiff', 0)
-    position_diff = home_features['Position'] - away_features['Position']
-    
-    # Hämta skade-features om tillgängligt
-    injury_features = {'InjuredPlayers_Home': 0, 'InjuredPlayers_Away': 0, 
-                      'KeyPlayersOut_Home': 0, 'KeyPlayersOut_Away': 0,
-                      'InjurySeverity_Home': 0, 'InjurySeverity_Away': 0}
-    
+
+    # Normalisera lagnamn för lookup
+    home_team_n = normalize_team_name(home_team)
+    away_team_n = normalize_team_name(away_team)
+
+    hist_need = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"]
+    if any(c not in df_features.columns for c in hist_need):
+        logger.error("df_features saknar nödvändiga kolumner för prediktion: %s",
+                     [c for c in hist_need if c not in df_features.columns])
+        return None
+
+    hist = df_features.copy()
+    hist["HomeTeam"] = hist["HomeTeam"].apply(normalize_team_name)
+    hist["AwayTeam"] = hist["AwayTeam"].apply(normalize_team_name)
+
+    states = build_current_team_states(hist)
+    hs = states.get(home_team_n)
+    as_ = states.get(away_team_n)
+    if hs is None or as_ is None:
+        return None
+
+    h2h_hw, h2h_d, h2h_aw, h2h_gd = compute_h2h(hist, home_team_n, away_team_n)
+
+    # Injury features (default 0; uppdateras om scraper finns)
+    injury_features = {
+        "InjuredPlayers_Home": 0,
+        "InjuredPlayers_Away": 0,
+        "KeyPlayersOut_Home": 0,
+        "KeyPlayersOut_Away": 0,
+        "InjurySeverity_Home": 0.0,
+        "InjurySeverity_Away": 0.0,
+    }
     if HAS_INJURY_SCRAPER:
         try:
-            injury_features = get_injury_features_for_match(home_team, away_team)
+            injury_features = get_injury_features_for_match(home_team_n, away_team_n)
         except Exception as e:
             logger.warning(f"Kunde inte hämta skade-features: {e}")
-    
-    # Skapa feature vector med alla 27 features (21 original + 6 skade-features)
-    feature_vector = np.array([[
-        home_features['FormPts'],
-        home_features['FormGD'],
-        away_features['FormPts'],
-        away_features['FormGD'],
-        home_features['FormHome'],
-        away_features['FormHome'],
-        home_features['GoalsFor'],
-        home_features['GoalsAgainst'],
-        away_features['GoalsFor'],
-        away_features['GoalsAgainst'],
-        home_features['Streak'],
-        away_features['Streak'],
-        h2h_home_wins,
-        h2h_draws,
-        h2h_away_wins,
-        h2h_home_goal_diff,
-        home_features['Position'],
-        away_features['Position'],
-        position_diff,
-        home_features['Elo'],
-        away_features['Elo'],
-        injury_features['InjuredPlayers_Home'],
-        injury_features['InjuredPlayers_Away'],
-        injury_features['KeyPlayersOut_Home'],
-        injury_features['KeyPlayersOut_Away'],
-        injury_features['InjurySeverity_Home'],
-        injury_features['InjurySeverity_Away']
-    ]])
-    
-    probs = model.predict_proba(feature_vector)[0]
-    
-    stats = {
-        "home_form_pts": home_features['FormPts'],
-        "home_form_gd": home_features['FormGD'],
-        "home_elo": home_features['Elo'],
-        "away_form_pts": away_features['FormPts'],
-        "away_form_gd": away_features['FormGD'],
-        "away_elo": away_features['Elo'],
-        "home_goals_for": home_features['GoalsFor'],
-        "away_goals_for": away_features['GoalsFor']
+
+    feature_dict = {
+        "HomeFormPts": hs["FormPts"],
+        "HomeFormGD": hs["FormGD"],
+        "AwayFormPts": as_["FormPts"],
+        "AwayFormGD": as_["FormGD"],
+        "HomeFormHome": hs["FormHome"],
+        "AwayFormAway": as_["FormAway"],
+        "HomeGoalsFor": hs["GoalsFor"],
+        "HomeGoalsAgainst": hs["GoalsAgainst"],
+        "AwayGoalsFor": as_["GoalsFor"],
+        "AwayGoalsAgainst": as_["GoalsAgainst"],
+        "HomeStreak": hs["Streak"],
+        "AwayStreak": as_["Streak"],
+        "H2H_HomeWins": h2h_hw,
+        "H2H_Draws": h2h_d,
+        "H2H_AwayWins": h2h_aw,
+        "H2H_HomeGoalDiff": h2h_gd,
+        "HomePosition": hs["Position"],
+        "AwayPosition": as_["Position"],
+        "PositionDiff": as_["Position"] - hs["Position"],  # samma definition som i feature_engineering
+        "HomeElo": hs["Elo"],
+        "AwayElo": as_["Elo"],
+        "League": hs.get("League", -1),
+        **injury_features,
     }
-    
+
+    row_df = build_feature_row(feature_dict)
+    probs_map = infer_predict_match(model, row_df)  # {"1","X","2"}
+    probs = np.array([probs_map["1"], probs_map["X"], probs_map["2"]], dtype=float)
+
+    stats = {
+        "home_form_pts": hs["FormPts"],
+        "home_form_gd": hs["FormGD"],
+        "home_elo": hs["Elo"],
+        "away_form_pts": as_["FormPts"],
+        "away_form_gd": as_["FormGD"],
+        "away_elo": as_["Elo"],
+        "home_goals_for": hs["GoalsFor"],
+        "away_goals_for": as_["GoalsFor"],
+    }
+
     return probs, stats
 
 
