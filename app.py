@@ -20,7 +20,7 @@ from typing import Optional, List, Tuple
 from main import run_pipeline, get_current_season_code
 from model_handler import load_model
 from xgboost import XGBClassifier
-from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input, calculate_match_entropy
+from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input, calculate_match_entropy, compute_half_guard_gain
 from utils import normalize_team_name, set_canonical_teams, get_canonical_teams
 
 # Konsistenta inference-moduler
@@ -586,6 +586,8 @@ with tab2:
                 
                 results = []
                 all_probs = []
+                all_entropy = []
+                all_trust_scores = []
                 
                 for home, away in matches:
                     result = predict_match(model, home, away, df_features)
@@ -598,19 +600,29 @@ with tab2:
                             "2": "N/A",
                             "Entropy": "N/A",
                             "Trust": "N/A",
+                            "HalfGain": "",
                             "Tips": "?",
                             "HALV": ""
                         })
                         all_probs.append(None)
+                        all_entropy.append(None)
+                        all_trust_scores.append(None)
                     else:
                         probs, stats = result
                         all_probs.append(probs)
                         
                         sign = ['1', 'X', '2'][np.argmax(probs)]
                         entropy = calculate_match_entropy(probs)
+                        all_entropy.append(entropy)
+                        
+                        trust_score_val = stats.get('trust_score', 50)
+                        all_trust_scores.append(trust_score_val)
+                        
                         trust_lbl = stats.get('trust_label', 'N/A')
                         if trust_lbl == "LOW":
                             trust_lbl = "LOW (varning)"
+                        
+                        gain = compute_half_guard_gain(probs)
                         
                         results.append({
                             "Match": f"{home} - {away}",
@@ -619,13 +631,19 @@ with tab2:
                             "2": f"{probs[2]:.1%}",
                             "Entropy": f"{entropy:.2f}" if entropy is not None else "N/A",
                             "Trust": trust_lbl,
+                            "HalfGain": f"{gain:.3f}",
                             "Tips": sign,
                             "HALV": ""
                         })
                 
-                # Applicera halvgarderingar
+                # Applicera halvgarderingar med gain-baserat urval
                 if num_halfguards > 0:
-                    guard_indices = pick_half_guards(all_probs, num_halfguards)
+                    guard_indices = pick_half_guards(
+                        all_probs, 
+                        num_halfguards,
+                        entropy_values=all_entropy,
+                        trust_scores=all_trust_scores,
+                    )
                     for idx in guard_indices:
                         if all_probs[idx] is not None:
                             results[idx]["Tips"] = get_halfguard_sign(all_probs[idx])
