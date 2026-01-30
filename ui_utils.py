@@ -1,11 +1,15 @@
 # ui_utils.py
+import math
 import re
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 
 # Importeras från utils.py, som vi vet fungerar
 from utils import normalize_team_name
 from uncertainty import entropy_norm
+
+# Epsilon för log-beräkningar (undviker log(0))
+EPS = 1e-15
 
 def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
     """
@@ -41,14 +45,59 @@ def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
 
 # --- NYTT: Logik för Halvgarderingar ---
 
-def pick_half_guards(match_probs: List[Optional[np.ndarray]], n_guards: int) -> List[int]:
+def compute_half_guard_gain(probs: np.ndarray) -> float:
     """
-    Väljer ut de mest osäkra matcherna för halvgardering baserat på entropy.
+    Beräknar gain från att halvgardera en match.
+    
+    gain = log(P_half) - log(P_spik)
+    
+    där P_spik = p_top1 (högsta sannolikheten)
+    och P_half = p_top1 + p_top2 (summan av de två högsta)
+    
+    Detta mäter hur mycket kupongens log-sannolikhet förbättras
+    av att halvgardera just den matchen.
+    
+    Args:
+        probs: Sannolikheter [p1, pX, p2]
+    
+    Returns:
+        gain (float): Förbättring i log-sannolikhet
+    """
+    sorted_probs = np.sort(probs)[::-1]
+    p_spik = max(sorted_probs[0], EPS)
+    p_half = max(sorted_probs[0] + sorted_probs[1], EPS)
+    
+    gain = math.log(p_half) - math.log(p_spik)
+    return gain
 
-    Strategi: Välj matcher med högst entropy (osäkerhet över hela 1/X/2-fördelningen).
-    Matcher som saknar data (None) får högsta prioritet för gardering (entropy = 2.0).
 
-    Returnerar en lista med index för de matcher som ska halvgarderas.
+def pick_half_guards(
+    match_probs: List[Optional[np.ndarray]], 
+    n_guards: int,
+    entropy_values: Optional[List[Optional[float]]] = None,
+    trust_scores: Optional[List[Optional[int]]] = None,
+) -> List[int]:
+    """
+    Väljer ut matcher för halvgardering baserat på expected gain.
+    
+    Strategi: Välj de N_HALF matcher som ger störst förbättring av
+    kupongens log-sannolikhet vid övergång från spik till halv.
+    
+    Matcher som saknar data (None) får högsta prioritet.
+    
+    Tie-breakers om gain är lika/nära:
+    1. högre entropy_norm först
+    2. lägre trust_score först (sämre datatäckning prioriteras)
+    3. lägre p_top1 först (svagare spik prioriteras)
+
+    Args:
+        match_probs: Lista med sannolikheter [1, X, 2] per match (eller None)
+        n_guards: Antal halvgarderingar att välja
+        entropy_values: Valfri lista med entropy per match (för tie-breaker)
+        trust_scores: Valfri lista med trust score per match (för tie-breaker)
+
+    Returns:
+        Lista med index för de matcher som ska halvgarderas.
     """
     if n_guards <= 0:
         return []
@@ -56,19 +105,39 @@ def pick_half_guards(match_probs: List[Optional[np.ndarray]], n_guards: int) -> 
     scored_matches = []
     for i, probs in enumerate(match_probs):
         if probs is None:
-            # Ge matcher utan data högsta prioritet (entropy > 1.0)
-            entropy = 2.0
+            scored_matches.append({
+                'index': i,
+                'gain': float('inf'),
+                'entropy': 2.0,
+                'trust_score': 0,
+                'p_spik': 0.0,
+            })
         else:
-            # Beräkna normaliserad entropy för sannolikhetsfördelningen
-            entropy = entropy_norm(probs[0], probs[1], probs[2])
-        
-        scored_matches.append({'entropy': entropy, 'index': i})
+            gain = compute_half_guard_gain(probs)
+            entropy = entropy_values[i] if entropy_values and entropy_values[i] is not None else entropy_norm(probs[0], probs[1], probs[2])
+            trust = trust_scores[i] if trust_scores and trust_scores[i] is not None else 50
+            p_spik = float(np.max(probs))
+            
+            scored_matches.append({
+                'index': i,
+                'gain': gain,
+                'entropy': entropy,
+                'trust_score': trust,
+                'p_spik': p_spik,
+            })
 
-    # Sortera efter entropy (högst först, dvs. mest osäker först)
-    scored_matches.sort(key=lambda x: x['entropy'], reverse=True)
+    # Sortera: högst gain först, sedan högst entropy, sedan lägst trust, sedan lägst p_spik
+    scored_matches.sort(
+        key=lambda x: (
+            -x['gain'],
+            -x['entropy'],
+            x['trust_score'],
+            x['p_spik'],
+        )
+    )
     
     # Välj ut de n_guards bästa indexen
-    guard_indices = [match['index'] for match in scored_matches[:n_guards]]
+    guard_indices = [m['index'] for m in scored_matches[:n_guards]]
     return guard_indices
 
 
