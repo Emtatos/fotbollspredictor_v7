@@ -6,8 +6,14 @@ Performs a time-based walk-forward backtest using tertiles (3 time segments)
 and reports metrics including entropy-based half-guard hit rates.
 
 Usage:
-    python backtest_report.py
+    python backtest_report.py              # Use cached data (default)
+    python backtest_report.py --refresh-data  # Download fresh data
+
+Environment:
+    BACKTEST_REFRESH_DATA=1  # Alternative to --refresh-data flag
 """
+import argparse
+import os
 import sys
 import logging
 from pathlib import Path
@@ -17,7 +23,6 @@ import pandas as pd
 from sklearn.metrics import log_loss, accuracy_score
 from sklearn.calibration import CalibratedClassifierCV
 
-from data_loader import download_season_data
 from data_processing import normalize_csv_data
 from feature_engineering import create_features
 from model_handler import _init_xgb_classifier, _fit_with_optional_early_stopping
@@ -31,6 +36,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 N_HALF = 4  # Number of half-guards per test block
+CACHE_DIR = Path("data/cache")
+LEAGUES = ["E0", "E1", "E2", "E3"]
 
 
 def compute_brier_score_multiclass(y_true: np.ndarray, y_proba: np.ndarray, n_classes: int = 3) -> float:
@@ -201,38 +208,145 @@ def compute_block_metrics(
     return metrics
 
 
-def load_data() -> pd.DataFrame:
-    """Load and prepare data using the same pipeline as training."""
+def get_seasons() -> List[str]:
+    """Get the list of seasons to use for backtest."""
     from main import get_current_season_code
-    
     CURRENT_SEASON = get_current_season_code()
-    LEAGUES = ["E0", "E1", "E2", "E3"]
-    
-    # Include current + 2 previous seasons
-    seasons = [
+    return [
         str(int(CURRENT_SEASON) - 202),
         str(int(CURRENT_SEASON) - 101),
         CURRENT_SEASON
     ]
+
+
+def get_cache_filename(league: str, season: str) -> Path:
+    """Get the cache file path for a league/season combination."""
+    return CACHE_DIR / f"{league}_{season}.csv"
+
+
+def check_cache_exists() -> Tuple[bool, List[Path], List[Tuple[str, str]]]:
+    """
+    Check if all required cache files exist.
     
-    logger.info("Loading data for seasons: %s", seasons)
+    Returns:
+        Tuple of (all_exist, existing_files, missing_combinations)
+    """
+    seasons = get_seasons()
+    existing_files = []
+    missing = []
     
-    downloaded_files = []
     for season in seasons:
-        files = download_season_data(season_code=season, leagues=LEAGUES)
-        downloaded_files.extend(files)
+        for league in LEAGUES:
+            cache_file = get_cache_filename(league, season)
+            if cache_file.exists():
+                existing_files.append(cache_file)
+            else:
+                missing.append((league, season))
     
-    if not downloaded_files:
-        logger.error("No files downloaded")
+    return len(missing) == 0, existing_files, missing
+
+
+def download_and_cache_data() -> List[Path]:
+    """
+    Download data from football-data.co.uk and save to cache.
+    
+    Returns list of cached file paths.
+    """
+    from data_loader import download_season_data
+    import shutil
+    
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    seasons = get_seasons()
+    
+    logger.info("Downloading data for seasons: %s", seasons)
+    cached_files = []
+    
+    for season in seasons:
+        try:
+            downloaded_files = download_season_data(season_code=season, leagues=LEAGUES)
+            
+            for src_file in downloaded_files:
+                league = src_file.stem.split("_")[0]
+                cache_file = get_cache_filename(league, season)
+                
+                shutil.copy(src_file, cache_file)
+                cached_files.append(cache_file)
+                logger.info("Cached: %s -> %s", src_file, cache_file)
+                
+        except Exception as e:
+            logger.error(
+                "Failed to download data for season %s. "
+                "URL: https://www.football-data.co.uk/mmz4281/%s/<LEAGUE>.csv "
+                "Cache path: %s. Error: %s",
+                season, season, CACHE_DIR, e
+            )
+            raise RuntimeError(
+                f"Download failed for season {season}. "
+                f"Check network connection and try again with --refresh-data"
+            ) from e
+    
+    return cached_files
+
+
+def load_data_from_cache() -> pd.DataFrame:
+    """Load data from cache files."""
+    all_exists, existing_files, missing = check_cache_exists()
+    
+    if not existing_files:
         return pd.DataFrame()
     
-    df_clean = normalize_csv_data(file_paths=downloaded_files)
+    logger.info("Loading %d cached files", len(existing_files))
+    df_clean = normalize_csv_data(file_paths=existing_files)
+    
     if df_clean.empty:
-        logger.error("No data normalized")
+        logger.error("No data could be normalized from cache")
         return pd.DataFrame()
     
     df_features = create_features(df=df_clean)
     return df_features
+
+
+def load_data(refresh: bool = False) -> pd.DataFrame:
+    """
+    Load and prepare data for backtest.
+    
+    Args:
+        refresh: If True, download fresh data. If False, use cache only.
+    
+    Returns:
+        DataFrame with features, or empty DataFrame on failure.
+    """
+    all_exists, existing_files, missing = check_cache_exists()
+    
+    if refresh:
+        logger.info("Refresh requested - downloading fresh data...")
+        try:
+            download_and_cache_data()
+            return load_data_from_cache()
+        except Exception as e:
+            logger.error("Download failed: %s", e)
+            return pd.DataFrame()
+    
+    if not all_exists:
+        logger.error("=" * 60)
+        logger.error("CACHE MISSING - Cannot run backtest without data")
+        logger.error("=" * 60)
+        logger.error("")
+        logger.error("Missing cache files for:")
+        for league, season in missing:
+            cache_path = get_cache_filename(league, season)
+            logger.error("  - %s (season %s): %s", league, season, cache_path)
+        logger.error("")
+        logger.error("To download data, run one of:")
+        logger.error("  python backtest_report.py --refresh-data")
+        logger.error("  BACKTEST_REFRESH_DATA=1 python backtest_report.py")
+        logger.error("")
+        logger.error("Cache directory: %s", CACHE_DIR.absolute())
+        logger.error("=" * 60)
+        return pd.DataFrame()
+    
+    logger.info("Using cached data from %s", CACHE_DIR)
+    return load_data_from_cache()
 
 
 def run_backtest(df: pd.DataFrame, n_folds: int = 3) -> List[Dict]:
@@ -356,11 +470,42 @@ def print_report(all_metrics: List[Dict]) -> None:
     print("=" * 60 + "\n")
 
 
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Run walk-forward backtest for fotbollspredictor",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python backtest_report.py              # Use cached data (default)
+  python backtest_report.py --refresh-data  # Download fresh data
+
+Environment variables:
+  BACKTEST_REFRESH_DATA=1  # Alternative to --refresh-data flag
+
+Cache location: data/cache/
+        """
+    )
+    parser.add_argument(
+        "--refresh-data",
+        action="store_true",
+        help="Download fresh data instead of using cache"
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
     """Main entry point."""
-    logger.info("Starting backtest report...")
+    args = parse_args()
     
-    df = load_data()
+    refresh = args.refresh_data or os.environ.get("BACKTEST_REFRESH_DATA", "").lower() in ("1", "true", "yes")
+    
+    if refresh:
+        logger.info("Starting backtest report with data refresh...")
+    else:
+        logger.info("Starting backtest report using cached data...")
+    
+    df = load_data(refresh=refresh)
     if df.empty:
         logger.error("Failed to load data")
         return 1
