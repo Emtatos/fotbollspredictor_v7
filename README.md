@@ -298,13 +298,31 @@ För frågor eller feedback, öppna en issue på GitHub.
 
 ## Backtest Report
 
-Kör en walk-forward backtest för att utvärdera modellens prestanda:
+Kör en walk-forward backtest för att utvärdera modellens prestanda.
+
+### Användning med cache (default)
+
+Scriptet använder lokal cache som default och laddar **inte** ner data automatiskt:
 
 ```bash
 python backtest_report.py
 ```
 
-Detta genererar en rapport med:
+### Uppdatera data
+
+För att ladda ner färsk data, använd `--refresh-data` flaggan eller miljövariabeln:
+
+```bash
+python backtest_report.py --refresh-data
+# eller
+BACKTEST_REFRESH_DATA=1 python backtest_report.py
+```
+
+Cache-mapp: `data/cache/`
+
+### Metrics
+
+Rapporten genererar:
 - **accuracy_top1**: Top-1 accuracy (argmax-prediktion)
 - **accuracy_top2_on_halfguards**: Top-2 accuracy på entropy-valda halvgarderingar
 - **combined_ticket_hit_rate**: Kombinerad träffprocent (top1 + top2 för HG)

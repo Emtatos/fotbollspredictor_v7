@@ -1,18 +1,25 @@
 """
 Tests for backtest_report.py
 """
+import os
 import pytest
 import numpy as np
 import pandas as pd
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 from backtest_report import (
     compute_brier_score_multiclass,
     compute_block_metrics,
     get_top2_predictions,
     train_model,
+    check_cache_exists,
+    get_cache_filename,
+    load_data,
+    CACHE_DIR,
+    LEAGUES,
 )
 
 
@@ -220,3 +227,114 @@ class TestBacktestReportScript:
         assert hasattr(backtest_report, 'run_backtest')
         assert hasattr(backtest_report, 'print_report')
         assert hasattr(backtest_report, 'load_data')
+
+
+class TestCacheBehavior:
+    """Tests for cache functionality."""
+
+    @pytest.fixture
+    def temp_cache_dir(self, tmp_path):
+        """Create a temporary cache directory."""
+        cache_dir = tmp_path / "data" / "cache"
+        cache_dir.mkdir(parents=True)
+        return cache_dir
+
+    @pytest.fixture
+    def mock_seasons(self):
+        """Mock seasons for testing."""
+        return ["2223", "2324", "2425"]
+
+    def test_check_cache_exists_with_all_files(self, tmp_path, mock_seasons):
+        """Test that check_cache_exists returns True when all files exist."""
+        cache_dir = tmp_path / "data" / "cache"
+        cache_dir.mkdir(parents=True)
+        
+        with patch('backtest_report.CACHE_DIR', cache_dir), \
+             patch('backtest_report.get_seasons', return_value=mock_seasons):
+            
+            for season in mock_seasons:
+                for league in LEAGUES:
+                    cache_file = cache_dir / f"{league}_{season}.csv"
+                    cache_file.write_text("Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n")
+            
+            all_exist, existing, missing = check_cache_exists()
+            
+            assert all_exist is True
+            assert len(missing) == 0
+            assert len(existing) == len(mock_seasons) * len(LEAGUES)
+
+    def test_check_cache_exists_with_missing_files(self, tmp_path, mock_seasons):
+        """Test that check_cache_exists returns False when files are missing."""
+        cache_dir = tmp_path / "data" / "cache"
+        cache_dir.mkdir(parents=True)
+        
+        with patch('backtest_report.CACHE_DIR', cache_dir), \
+             patch('backtest_report.get_seasons', return_value=mock_seasons):
+            
+            all_exist, existing, missing = check_cache_exists()
+            
+            assert all_exist is False
+            assert len(existing) == 0
+            assert len(missing) == len(mock_seasons) * len(LEAGUES)
+
+    def test_load_data_without_cache_and_no_refresh(self, tmp_path, mock_seasons, capsys):
+        """Test that load_data fails gracefully when cache is missing and refresh=False."""
+        cache_dir = tmp_path / "data" / "cache"
+        cache_dir.mkdir(parents=True)
+        
+        with patch('backtest_report.CACHE_DIR', cache_dir), \
+             patch('backtest_report.get_seasons', return_value=mock_seasons):
+            
+            df = load_data(refresh=False)
+            
+            assert df.empty
+            
+            captured = capsys.readouterr()
+
+    def test_load_data_uses_cache_when_available(self, tmp_path, mock_seasons):
+        """Test that load_data uses cache files when they exist."""
+        cache_dir = tmp_path / "data" / "cache"
+        cache_dir.mkdir(parents=True)
+        
+        csv_content = """Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,League
+2024-01-01,TeamA,TeamB,2,1,H,E0
+2024-01-02,TeamC,TeamD,1,1,D,E0
+2024-01-03,TeamE,TeamF,0,2,A,E0
+"""
+        
+        with patch('backtest_report.CACHE_DIR', cache_dir), \
+             patch('backtest_report.get_seasons', return_value=mock_seasons):
+            
+            for season in mock_seasons:
+                for league in LEAGUES:
+                    cache_file = cache_dir / f"{league}_{season}.csv"
+                    cache_file.write_text(csv_content)
+            
+            with patch('backtest_report.normalize_csv_data') as mock_normalize, \
+                 patch('backtest_report.create_features') as mock_features:
+                
+                mock_df = pd.DataFrame({'col': [1, 2, 3]})
+                mock_normalize.return_value = mock_df
+                mock_features.return_value = mock_df
+                
+                df = load_data(refresh=False)
+                
+                mock_normalize.assert_called_once()
+                mock_features.assert_called_once()
+
+    def test_get_cache_filename(self, mock_seasons):
+        """Test that cache filenames are generated correctly."""
+        with patch('backtest_report.get_seasons', return_value=mock_seasons):
+            filename = get_cache_filename("E0", "2425")
+            assert filename == CACHE_DIR / "E0_2425.csv"
+
+    def test_script_has_cache_functions(self):
+        """Test that the script has all required cache-related functions."""
+        import backtest_report
+        
+        assert hasattr(backtest_report, 'check_cache_exists')
+        assert hasattr(backtest_report, 'get_cache_filename')
+        assert hasattr(backtest_report, 'download_and_cache_data')
+        assert hasattr(backtest_report, 'load_data_from_cache')
+        assert hasattr(backtest_report, 'CACHE_DIR')
+        assert hasattr(backtest_report, 'parse_args')
