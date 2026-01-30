@@ -20,7 +20,7 @@ from typing import Optional, List, Tuple
 from main import run_pipeline, get_current_season_code
 from model_handler import load_model
 from xgboost import XGBClassifier
-from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input
+from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input, calculate_match_entropy
 from utils import normalize_team_name, set_canonical_teams, get_canonical_teams
 
 # Konsistenta inference-moduler
@@ -576,8 +576,9 @@ with tab2:
                             "1": "N/A",
                             "X": "N/A",
                             "2": "N/A",
+                            "Entropy": "N/A",
                             "Tips": "?",
-                            "Status": "❌ Ingen data"
+                            "HALV": ""
                         })
                         all_probs.append(None)
                     else:
@@ -585,14 +586,16 @@ with tab2:
                         all_probs.append(probs)
                         
                         sign = ['1', 'X', '2'][np.argmax(probs)]
+                        entropy = calculate_match_entropy(probs)
                         
                         results.append({
                             "Match": f"{home} - {away}",
                             "1": f"{probs[0]:.1%}",
                             "X": f"{probs[1]:.1%}",
                             "2": f"{probs[2]:.1%}",
+                            "Entropy": f"{entropy:.2f}" if entropy is not None else "N/A",
                             "Tips": sign,
-                            "Status": "✅"
+                            "HALV": ""
                         })
                 
                 # Applicera halvgarderingar
@@ -601,7 +604,7 @@ with tab2:
                     for idx in guard_indices:
                         if all_probs[idx] is not None:
                             results[idx]["Tips"] = get_halfguard_sign(all_probs[idx])
-                            results[idx]["Status"] = "✅ (½)"
+                            results[idx]["HALV"] = "HALV"
                 
                 df_results = pd.DataFrame(results)
                 st.dataframe(df_results, use_container_width=True, hide_index=True)

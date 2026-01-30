@@ -3,7 +3,7 @@ Enhetstester för ui_utils.py
 """
 import pytest
 import numpy as np
-from ui_utils import parse_match_input, pick_half_guards, get_halfguard_sign
+from ui_utils import parse_match_input, pick_half_guards, get_halfguard_sign, calculate_match_entropy
 from utils import set_canonical_teams
 
 
@@ -78,21 +78,35 @@ Liverpool - Manchester United"""
 
 
 class TestPickHalfGuards:
-    """Tester för pick_half_guards-funktionen"""
+    """Tester för pick_half_guards-funktionen (entropy-baserad)"""
     
-    def test_pick_most_uncertain_matches(self):
-        """Testar att de mest osäkra matcherna väljs"""
-        # Skapa sannolikheter där andra matchen är mest osäker
+    def test_pick_most_uncertain_matches_by_entropy(self):
+        """Testar att matcher med högst entropy väljs för halvgardering"""
+        # Skapa sannolikheter där andra matchen har högst entropy (mest osäker)
         probs = [
-            np.array([0.7, 0.2, 0.1]),  # Tydlig favorit
-            np.array([0.4, 0.35, 0.25]),  # Mycket osäker
-            np.array([0.6, 0.3, 0.1])   # Ganska tydlig
+            np.array([0.7, 0.2, 0.1]),  # Tydlig favorit, låg entropy
+            np.array([0.34, 0.33, 0.33]),  # Nära uniform, hög entropy
+            np.array([0.6, 0.3, 0.1])   # Ganska tydlig, medel entropy
         ]
         
         result = pick_half_guards(probs, n_guards=1)
         
-        # Index 1 (andra matchen) ska väljas
+        # Index 1 (andra matchen med högst entropy) ska väljas
         assert 1 in result
+    
+    def test_entropy_based_selection_order(self):
+        """Testar att urvalet sorteras efter entropy (högst först)"""
+        probs = [
+            np.array([0.7, 0.2, 0.1]),  # Låg entropy
+            np.array([0.34, 0.33, 0.33]),  # Högst entropy (nära uniform)
+            np.array([0.5, 0.3, 0.2])   # Medel entropy
+        ]
+        
+        result = pick_half_guards(probs, n_guards=2)
+        
+        # Index 1 ska komma först (högst entropy), sedan index 2
+        assert result[0] == 1
+        assert result[1] == 2
     
     def test_none_values_prioritized(self):
         """Testar att matcher utan data prioriteras för gardering"""
@@ -129,6 +143,34 @@ class TestPickHalfGuards:
         
         # Ska returnera max 2 (antalet matcher)
         assert len(result) <= 2
+
+
+class TestCalculateMatchEntropy:
+    """Tester för calculate_match_entropy-funktionen"""
+
+    def test_returns_none_for_none_probs(self):
+        """Testar att None returneras om probs är None"""
+        result = calculate_match_entropy(None)
+        assert result is None
+
+    def test_returns_float_for_valid_probs(self):
+        """Testar att ett float-värde returneras för giltiga sannolikheter"""
+        probs = np.array([0.5, 0.3, 0.2])
+        result = calculate_match_entropy(probs)
+        assert isinstance(result, float)
+        assert 0.0 <= result <= 1.0
+
+    def test_high_entropy_for_uniform(self):
+        """Testar att entropy är hög för uniform fördelning"""
+        probs = np.array([1/3, 1/3, 1/3])
+        result = calculate_match_entropy(probs)
+        assert result == pytest.approx(1.0, abs=1e-10)
+
+    def test_low_entropy_for_certain(self):
+        """Testar att entropy är låg för säker prediktion"""
+        probs = np.array([0.9, 0.05, 0.05])
+        result = calculate_match_entropy(probs)
+        assert result < 0.5
 
 
 class TestGetHalfguardSign:
