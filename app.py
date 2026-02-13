@@ -29,6 +29,7 @@ from features import compute_h2h
 from inference import build_feature_row, predict_match as infer_predict_match
 from schema import FEATURE_COLUMNS
 from trust import compute_trust_features, trust_score
+from metadata import load_metadata
 
 
 # News scraper för AI-analys
@@ -310,6 +311,7 @@ MODEL_FILENAME = f"xgboost_model_v7_{get_current_season_code()}.joblib"
 model_path = Path("models") / MODEL_FILENAME
 model = load_cached_model(model_path)
 df_features = load_feature_data(Path("data") / "features.parquet")
+model_metadata = load_metadata(Path("models"))
 
 # Sätt kanoniska lagnamn om data finns
 if df_features is not None and not df_features.empty:
@@ -345,6 +347,29 @@ with st.sidebar:
     else:
         st.warning("⚠️ Ingen data laddad")
         all_teams = []
+    
+    if model_metadata:
+        with st.expander("📋 Model Card"):
+            st.markdown(f"**Version:** {model_metadata.get('model_version', 'N/A')}")
+            st.markdown(f"**Tränad:** {model_metadata.get('train_date', 'N/A')[:10]}")
+            cov = model_metadata.get("dataset_coverage", {})
+            dr = cov.get("date_range", {})
+            if dr.get("min") and dr.get("max"):
+                st.markdown(f"**Dataperiod:** {dr['min'][:10]} – {dr['max'][:10]}")
+            leagues = cov.get("leagues", [])
+            if leagues:
+                st.markdown(f"**Ligor:** {', '.join(leagues)}")
+            feats = model_metadata.get("features", [])
+            st.markdown(f"**Features:** {len(feats)}")
+            groups = model_metadata.get("ablation_groups", [])
+            if groups:
+                st.markdown(f"**Ablation:** {', '.join(groups)}")
+            use_odds = model_metadata.get("use_odds_features", False)
+            st.markdown(f"**Odds-features:** {'Ja' if use_odds else 'Nej'}")
+            st.markdown(f"**Kalibrering:** {model_metadata.get('calibration_method', 'N/A')}")
+            splits = model_metadata.get("splits", {})
+            if splits:
+                st.markdown(f"**Split:** train={splits.get('train',0)}, cal={splits.get('calibrate',0)}, test={splits.get('test',0)}")
     
     # OpenAI-status
     if HAS_OPENAI and (os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)):
@@ -518,6 +543,33 @@ with tab1:
                 df_result = pd.DataFrame([result_data])
                 st.dataframe(df_result, use_container_width=True, hide_index=True)
                 
+                # Feature contributions (top 5 via XGB)
+                if hasattr(model, "feature_names_in_") or hasattr(model, "estimator"):
+                    try:
+                        from schema import get_expected_feature_columns
+                        feat_names = get_expected_feature_columns(model)
+                        base = model.estimator if hasattr(model, "estimator") else model
+                        if hasattr(base, "get_booster"):
+                            booster = base.get_booster()
+                            importance = booster.get_score(importance_type="gain")
+                            pairs = []
+                            for fname, gain in importance.items():
+                                idx = int(fname.replace("f", "")) if fname.startswith("f") and fname[1:].isdigit() else -1
+                                name = feat_names[idx] if 0 <= idx < len(feat_names) else fname
+                                pairs.append((name, float(gain)))
+                            pairs.sort(key=lambda x: x[1], reverse=True)
+                            top5 = pairs[:5]
+                            with st.expander("Top 5 feature contributions (gain)"):
+                                for rank, (name, gain) in enumerate(top5, 1):
+                                    st.markdown(f"{rank}. **{name}** — gain {gain:.1f}")
+                    except Exception:
+                        pass
+
+                if model_metadata:
+                    use_odds = model_metadata.get("use_odds_features", False)
+                    if not use_odds:
+                        st.caption("Modellen tr\u00e4nades utan odds-features.")
+
                 # Visa tipsrad
                 st.subheader("📝 Tipsrad för kopiering")
                 st.code(sign, language=None)
@@ -644,11 +696,11 @@ with tab2:
 # ============================================================================
 
 with tab3:
-    st.header("Om Fotbollspredictor v7.6")
+    st.header("Om Fotbollspredictor v8")
     
     st.markdown("""
-    Fotbollspredictor v7.6 är en avancerad maskininlärningsapplikation designad för att prediktera fotbollsmatcher 
-    med hög noggrannhet. Appen kombinerar statistisk analys med realtidsdata för att ge insiktsfulla och datadrivna förutsägelser.
+    Fotbollspredictor v8 bygger vidare med en professionell ML-pipeline:
+    unified FeatureBuilder, walk-forward validering, kalibrering, och stod for odds som valbar feature-grupp.
     """)
     
     st.divider()
@@ -656,36 +708,39 @@ with tab3:
     st.subheader("🧠 Hur fungerar modellen?")
     
     st.markdown("""
-    Modellen använder en **XGBoost-algoritm** (Extreme Gradient Boosting), en kraftfull och beprövad metod för 
-    prediktiv modellering. Den tränas på tusentals historiska matcher från Premier League, Championship och League One.
+    Modellen anvander **XGBoost** med **CalibratedClassifierCV** (sigmoid/isotonic).
+    Traning sker med tidssorterad split (train/calibrate/test) och walk-forward cross-validation (3 folds).
+    Hyperparametrar optimeras via RandomizedSearchCV pa train-only data.
     """)
     
-    st.markdown("#### Features (27 totalt)")
-    st.markdown("Modellen analyserar **27 olika features** för varje match. Dessa kan delas in i sex huvudkategorier:")
+    if model_metadata:
+        feats = model_metadata.get("features", [])
+        n_feats = len(feats)
+    else:
+        n_feats = len(FEATURE_COLUMNS)
+    
+    st.markdown(f"#### Feature-grupper ({n_feats} features)")
     
     feature_data = {
-        "Kategori": ["Form", "Målstatistik", "Momentum", "Head-to-Head", "Styrka & Position", "Mänsklig påverkan"],
-        "Antal": [6, 4, 2, 4, 5, 6],
-        "Exempel på features": [
-            "Genomsnittlig poäng, målskillnad (senaste 5 matcher)",
-            "Genomsnitt gjorda/insläppta mål",
-            "Vinst/förlust-streak",
-            "Tidigare möten mellan lagen",
-            "ELO-rating, ligaposition",
-            "Skador, suspenderingar, nyckelspelare borta"
-        ]
+        "Grupp": ["Base (form, ELO, H2H, position)", "Matchstats (shots, SOT, corners, cards)", "Odds (implied probs)", "Skador"],
+        "Antal": [22, 24, 4, 6],
+        "Beskrivning": [
+            "FormPts, FormGD, Streak, Elo, Position, H2H, League",
+            "Rolling shots/SOT (5,10), conversion, corner share, cards rate + has_matchstats",
+            "has_odds, ImpliedHome, ImpliedDraw, ImpliedAway (valbar via USE_ODDS_FEATURES)",
+            "InjuredPlayers, KeyPlayersOut, InjurySeverity (Home/Away)",
+        ],
     }
     st.dataframe(feature_data, use_container_width=True, hide_index=True)
     
     st.info("""
-    **Nytt i v7.6: Mänsklig påverkan**
-    
-    Den senaste versionen integrerar **skador och suspenderingar** via API-Football. Detta ger en mer realistisk bild 
-    av lagens aktuella styrka.
-    
-    - **Datakälla:** API-Football (uppdateras dagligen)
-    - **Nya features:** Antal skadade, antal nyckelspelare borta, allvarlighetsgrad (0-10)
-    - **Användning:** Klicka "Uppdatera skador & form" i sidomenyn för att hämta färsk data.
+    **Nytt i v8:**
+    - **Unified FeatureBuilder** — samma logik for traning och inference, eliminerar mismatch
+    - **Walk-forward validering** — 3 folds over tid, rapporterar mean + std
+    - **Kalibrering** — sigmoid/isotonic pa separat calibration split
+    - **Odds som valbar feature** — trana med/utan odds, jamfor i backtest-rapporten
+    - **Matchstats** — rolling shots, SOT, conversion, corner share, cards rate
+    - **Backtest-rapport** — logloss, brier, accuracy, F1, per liga/sasong, reliability bins
     """)
     
     st.divider()
@@ -696,38 +751,17 @@ with tab3:
     
     with col1:
         st.markdown("""
-        - **Enskild match-prediktion:** Analysera en specifik match i detalj.
-        - **Flera matcher:** Tippa en hel omgång samtidigt.
-        - **Halvgarderingar:** Få förslag på vilka matcher som är mest osäkra.
+        - **Enskild match-prediktion** med feature contributions (top 5 gain)
+        - **Flera matcher** — tippa en hel omgang samtidigt
+        - **Halvgarderingar** — forslag pa ossakra matcher
         """)
     
     with col2:
         st.markdown("""
-        - **AI-analys (valfritt):** OpenAI-driven textanalys av matchen.
-        - **On-demand data-uppdatering:** Hämta färsk skadedata med en knapptryckning.
-        - **Automatisk omträning:** Träna om modellen med den senaste datan.
+        - **Model Card** i sidomenyn: version, traning, features, ablation
+        - **Trust score** — datatackning per prediktion
+        - **AI-analys (valfritt)** via OpenAI
         """)
-    
-    st.divider()
-    
-    st.subheader("🚀 Framtida förbättringsmöjligheter")
-    
-    st.markdown("För att ytterligare förbättra noggrannheten finns flera spännande möjligheter:")
-    
-    improvements_data = {
-        "Förbättring": ["Tränarbyte", "Spelarbetyg", "Vilodagar", "Väder", "Historisk skadedata", "Live-odds", "Avancerad H2H"],
-        "Beskrivning": [
-            "Implementera 'new manager bounce'-effekten.",
-            "Använd individuell spelarform istället för bara lagform.",
-            "Analysera hur tätt matchschema påverkar prestation.",
-            "Ta hänsyn till väderförhållanden (regn, vind, etc.).",
-            "Träna modellen på historisk skadedata, inte bara aktuell.",
-            "Jämför modellens prediktioner med live-odds från spelbolag.",
-            "Analysera taktiska mönster i tidigare möten."
-        ],
-        "Potentiell påverkan": ["🔴 Hög", "🔴 Hög", "🟡 Medel", "🟡 Låg-Medel", "🔴 Hög", "🟡 Medel", "🟡 Medel"]
-    }
-    st.dataframe(improvements_data, use_container_width=True, hide_index=True)
     
     st.divider()
     
@@ -737,40 +771,39 @@ with tab3:
         st.subheader("📊 Teknisk Stack")
         st.markdown("""
         - **Frontend:** Streamlit
-        - **Backend:** Python
-        - **ML-modell:** XGBoost, scikit-learn
-        - **Datahantering:** pandas, numpy, pyarrow
-        - **API-integration:** requests, python-dotenv
-        - **Testning:** pytest, pytest-cov (46 tester)
+        - **ML:** XGBoost + scikit-learn (CalibratedClassifierCV)
+        - **Data:** pandas, numpy, pyarrow
+        - **Testning:** pytest (118+ tester, CI pa Python 3.9/3.10/3.11)
         - **Deployment:** Render, Docker
         """)
     
     with col2:
-        st.subheader("🔧 Utveckling & Kvalitet")
+        st.subheader("🔧 Pipeline")
         st.markdown("""
-        Projektet följer moderna best practices:
-        - **Modulär arkitektur:** Lätt att underhålla och bygga ut.
-        - **Automatiserad testning:** 42 enhetstester och 4 integrationstester.
-        - **Prestandaoptimering:** 5-10x snabbare feature engineering.
-        - **CI/CD-redo:** Automatisk deployment via GitHub och Render.
-        - **Säkerhet:** API-nycklar hanteras via miljövariabler.
+        1. **Data ingestion** — download + normalize + Season extraction
+        2. **Feature engineering** — unified FeatureBuilder (replay engine)
+        3. **Training** — hyperparam search + walk-forward + calibration
+        4. **Report** — backtest_report.md med alla metriker
+        5. **Metadata** — metadata.json med full reproducerbarhet
         """)
     
     st.divider()
     
     st.subheader("📝 Version")
-    st.success("**v7.6.0** - 'Human Impact' Edition")
+    if model_metadata:
+        ver = model_metadata.get("model_version", "v8.0")
+        st.success(f"**{ver}**")
+    else:
+        st.success("**v8.0**")
     
     st.subheader("🐛 Felsökning")
     
     st.markdown("""
-    Om du stöter på problem:
-    1. **Uppdatera skadedata:** Klicka "Uppdatera skador & form" i sidomenyn.
-    2. **Kör omträning:** Klicka "Kör omträning av modell".
-    3. **Kontrollera API-nyckel:** Verifiera att `API_FOOTBALL_KEY` är korrekt i Render.
-    4. **Se loggar:** Kolla loggarna i Render Dashboard för felmeddelanden.
+    1. **Kör omträning** via sidomenyn.
+    2. **Kontrollera API-nyckel** for skadedata (`API_FOOTBALL_KEY`).
+    3. **Se loggar** i Render Dashboard.
     """)
     
     st.divider()
     
-    st.caption("Utvecklad av **Manus AI** på uppdrag av **Emtatos**.")
+    st.caption("Utvecklad av **Emtatos**.")
