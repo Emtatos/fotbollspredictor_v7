@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -15,7 +16,17 @@ from sklearn.metrics import (
 from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 from xgboost import XGBClassifier
 
-from schema import CLASS_MAP, FEATURE_COLUMNS, encode_league
+from schema import ALL_FEATURE_COLUMNS, CLASS_MAP, FEATURE_COLUMNS, ODDS_FEATURE_COLUMNS, encode_league
+
+
+def use_odds_features() -> bool:
+    return os.environ.get("USE_ODDS_FEATURES", "0") == "1"
+
+
+def get_feature_columns(with_odds: bool = False) -> List[str]:
+    if with_odds:
+        return list(ALL_FEATURE_COLUMNS)
+    return list(FEATURE_COLUMNS)
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +86,14 @@ def _time_split(df: pd.DataFrame, train_frac: float = 0.70, cal_frac: float = 0.
     return df.iloc[:t1], df.iloc[t1:t2], df.iloc[t2:]
 
 
-def _prepare_df(df_features: pd.DataFrame) -> pd.DataFrame:
+def _prepare_df(df_features: pd.DataFrame, feature_cols: List[str]) -> pd.DataFrame:
     df = df_features.copy()
     if "League" in df.columns:
         df["League"] = df["League"].apply(encode_league)
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date"]).sort_values("Date", ascending=True).reset_index(drop=True)
-    missing = [c for c in FEATURE_COLUMNS if c not in df.columns]
+    missing = [c for c in feature_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Missing features: {missing}")
     return df
@@ -213,6 +224,36 @@ def _top_features_by_gain(model: XGBClassifier, feature_names: List[str], top_k:
     return pairs[:top_k]
 
 
+def _quick_eval(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    label: str,
+) -> Dict:
+    train_df, cal_df, test_df = _time_split(df)
+    X_tr = train_df[feature_cols]
+    y_tr = train_df["FTR"].map(CLASS_MAP)
+    X_cal = cal_df[feature_cols]
+    y_cal = cal_df["FTR"].map(CLASS_MAP)
+    X_te = test_df[feature_cols]
+    y_te = test_df["FTR"].map(CLASS_MAP)
+
+    model = _make_base_xgb()
+    model.fit(X_tr, y_tr, eval_set=[(X_cal, y_cal)], verbose=False)
+    proba = model.predict_proba(X_te)
+    preds = model.predict(X_te)
+    y_arr = np.array(y_te)
+
+    result: Dict = {"variant": label, "n_test": len(y_arr)}
+    result["accuracy"] = round(float(accuracy_score(y_arr, preds)), 4)
+    result["f1_macro"] = round(float(f1_score(y_arr, preds, average="macro", zero_division=0)), 4)
+    result["brier"] = round(float(_brier_multiclass(y_arr, proba)), 4)
+    try:
+        result["logloss"] = round(float(log_loss(y_arr, proba, labels=[0, 1, 2])), 4)
+    except Exception:
+        result["logloss"] = float("nan")
+    return result
+
+
 def generate_backtest_report(
     metrics: Dict,
     walk_forward: Dict,
@@ -224,6 +265,7 @@ def generate_backtest_report(
     train_size: int,
     cal_size: int,
     test_size: int,
+    variant_comparison: Optional[List[Dict]] = None,
 ) -> str:
     lines = ["# Backtest Report", ""]
     lines.append("## Split Summary")
@@ -287,6 +329,15 @@ def generate_backtest_report(
         lines.append(f"| {b['bin_lo']}-{b['bin_hi']} | {b['count']} | {b['avg_conf']} | {b['avg_acc']} |")
     lines.append("")
 
+    if variant_comparison:
+        lines.append("## Model Variant Comparison (base vs +odds)")
+        header = ["variant", "n_test", "logloss", "brier", "accuracy", "f1_macro"]
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+        for v in variant_comparison:
+            lines.append("| " + " | ".join(str(v.get(k, "")) for k in header) + " |")
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -300,15 +351,19 @@ def train_and_save_model(
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model_dir = model_path.parent if model_path.parent != Path(".") else MODEL_DIR
 
+    with_odds = use_odds_features()
+    feat_cols = get_feature_columns(with_odds=with_odds)
+    logger.info("USE_ODDS_FEATURES=%s  feature_count=%d", with_odds, len(feat_cols))
+
     try:
-        df = _prepare_df(df_features)
-        X_full = df[FEATURE_COLUMNS]
+        df = _prepare_df(df_features, feat_cols)
+        X_full = df[feat_cols]
         y_full = df["FTR"].map(CLASS_MAP)
 
         train_df, cal_df, test_df = _time_split(df)
-        X_train, y_train = train_df[FEATURE_COLUMNS], train_df["FTR"].map(CLASS_MAP)
-        X_cal, y_cal = cal_df[FEATURE_COLUMNS], cal_df["FTR"].map(CLASS_MAP)
-        X_test, y_test = test_df[FEATURE_COLUMNS], test_df["FTR"].map(CLASS_MAP)
+        X_train, y_train = train_df[feat_cols], train_df["FTR"].map(CLASS_MAP)
+        X_cal, y_cal = cal_df[feat_cols], cal_df["FTR"].map(CLASS_MAP)
+        X_test, y_test = test_df[feat_cols], test_df["FTR"].map(CLASS_MAP)
 
         logger.info("Split: train=%d, calibrate=%d, test=%d", len(X_train), len(X_cal), len(X_test))
 
@@ -361,8 +416,18 @@ def train_and_save_model(
 
         conf_mat = confusion_matrix(y_test_arr, test_preds, labels=[0, 1, 2])
         reliability = _reliability_bins(y_test_arr, test_proba)
-        top_feat = _top_features_by_gain(base_model, list(FEATURE_COLUMNS))
+        top_feat = _top_features_by_gain(base_model, list(feat_cols))
         per_league = _per_league_season_metrics(test_df, y_test_arr, test_proba, test_preds)
+
+        variant_comparison: Optional[List[Dict]] = None
+        has_odds_col = all(c in df.columns for c in ODDS_FEATURE_COLUMNS)
+        if has_odds_col:
+            logger.info("Running variant comparison (base vs +odds)...")
+            base_eval = _quick_eval(df, list(FEATURE_COLUMNS), "base")
+            odds_eval = _quick_eval(df, list(ALL_FEATURE_COLUMNS), "+odds")
+            variant_comparison = [base_eval, odds_eval]
+            logger.info("base logloss=%.4f  +odds logloss=%.4f",
+                        base_eval["logloss"], odds_eval["logloss"])
 
         report = generate_backtest_report(
             metrics=test_metrics,
@@ -375,6 +440,7 @@ def train_and_save_model(
             train_size=len(X_train),
             cal_size=len(X_cal),
             test_size=len(X_test),
+            variant_comparison=variant_comparison,
         )
         report_dir = Path("reports")
         report_dir.mkdir(parents=True, exist_ok=True)
