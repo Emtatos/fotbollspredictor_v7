@@ -56,5 +56,8 @@ htmlcov/
 *~
 .DS_Store
 
+# Reports (generated)
+reports/
+
 # Logs
 *.log
