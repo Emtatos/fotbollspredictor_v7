@@ -8,6 +8,8 @@ from data_loader import download_season_data
 from data_processing import normalize_csv_data
 from feature_engineering import create_features
 from model_handler import train_and_save_model, load_model
+from metadata import generate_metadata
+from schema import FEATURE_COLUMNS
 
 # Konfigurera en global logger för huvudskriptet
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -106,6 +108,27 @@ def run_pipeline(include_previous_seasons=True):
         logger.error("Modellträningen misslyckades. Avbryter pipeline.")
         return
     logger.info("Modellen har tränats och sparats framgångsrikt.")
+
+    # --- 5b. Spara metadata ---
+    logger.info("--- Steg 4b: Sparar metadata ---")
+    try:
+        date_col = df_features["Date"] if "Date" in df_features.columns else None
+        date_range = None
+        if date_col is not None:
+            date_range = (str(date_col.min()), str(date_col.max()))
+
+        meta_path = generate_metadata(
+            model_dir=model_path.parent,
+            features_list=list(FEATURE_COLUMNS),
+            calibration_method="sigmoid",
+            train_size=len(df_features),
+            dataset_leagues=LEAGUES,
+            dataset_seasons=seasons,
+            dataset_date_range=date_range,
+        )
+        logger.info("Metadata sparad till: %s", meta_path)
+    except Exception as e:
+        logger.warning("Kunde inte spara metadata: %s", e)
 
     # --- 6. Verifiera laddning av modell (valfritt test) ---
     logger.info("--- Steg 5: Verifierar att modellen kan laddas ---")
