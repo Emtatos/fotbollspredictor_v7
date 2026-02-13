@@ -44,6 +44,21 @@ class FeatureBuilder:
 
         self._h2h: Dict[tuple, deque] = defaultdict(lambda: deque(maxlen=5))
 
+        self._shots_for_5: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._shots_against_5: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._shots_for_10: Dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
+        self._shots_against_10: Dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
+        self._sot_for_5: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._sot_against_5: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._sot_for_10: Dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
+        self._sot_against_10: Dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
+        self._corners_for: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._corners_against: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._cards_5: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._goals_total_5: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._sot_total_5: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5))
+        self._has_stats: Dict[str, bool] = defaultdict(bool)
+
     def _get_table_key(self, league_code: int, season: str) -> Tuple[int, str]:
         return (league_code, season)
 
@@ -94,6 +109,30 @@ class FeatureBuilder:
         avg_gd = (gd_sum / gd_n) if gd_n else 0.0
         return home_wins, draws, away_wins, avg_gd
 
+    def _stats_features(self, team: str, prefix: str) -> Dict[str, float]:
+        eps = 1e-9
+        has = 1.0 if self._has_stats[team] else 0.0
+        f: Dict[str, float] = {}
+        f[prefix + "Shots5"] = _mean(self._shots_for_5[team])
+        f[prefix + "ShotsAg5"] = _mean(self._shots_against_5[team])
+        f[prefix + "Shots10"] = _mean(self._shots_for_10[team])
+        f[prefix + "ShotsAg10"] = _mean(self._shots_against_10[team])
+        f[prefix + "SOT5"] = _mean(self._sot_for_5[team])
+        f[prefix + "SOTAg5"] = _mean(self._sot_against_5[team])
+        f[prefix + "SOT10"] = _mean(self._sot_for_10[team])
+        f[prefix + "SOTAg10"] = _mean(self._sot_against_10[team])
+
+        goals_sum = sum(self._goals_total_5[team]) if self._goals_total_5[team] else 0.0
+        sot_sum = sum(self._sot_total_5[team]) if self._sot_total_5[team] else 0.0
+        f[prefix + "Conversion"] = (goals_sum + 1.0) / (sot_sum + 2.0)
+
+        corners_f = sum(self._corners_for[team]) if self._corners_for[team] else 0.0
+        corners_a = sum(self._corners_against[team]) if self._corners_against[team] else 0.0
+        f[prefix + "CornerShare"] = corners_f / (corners_f + corners_a + eps)
+
+        f[prefix + "CardsRate"] = _mean(self._cards_5[team])
+        return f
+
     def _pre_match_features(
         self, home_team: str, away_team: str, league_code: int, season: str
     ) -> Dict[str, float]:
@@ -101,7 +140,16 @@ class FeatureBuilder:
         away_pos = self._compute_position(league_code, season, away_team)
         h2h_hw, h2h_d, h2h_aw, h2h_gd = self._compute_h2h(home_team, away_team)
 
-        return {
+        home_has = self._has_stats[home_team]
+        away_has = self._has_stats[away_team]
+        has_matchstats = 1.0 if (home_has and away_has) else 0.0
+
+        home_sot_f = sum(self._sot_for_5[home_team]) if self._sot_for_5[home_team] else 0.0
+        away_sot_f = sum(self._sot_for_5[away_team]) if self._sot_for_5[away_team] else 0.0
+        eps = 1e-9
+        sot_share_home = home_sot_f / (home_sot_f + away_sot_f + eps)
+
+        features = {
             "HomeFormPts": _mean(self._points_all[home_team]),
             "HomeFormGD": _mean(self._gd_all[home_team]),
             "AwayFormPts": _mean(self._points_all[away_team]),
@@ -124,7 +172,12 @@ class FeatureBuilder:
             "HomeElo": float(self._elo[home_team]),
             "AwayElo": float(self._elo[away_team]),
             "League": float(league_code),
+            "has_matchstats": has_matchstats,
+            "SOTShareHome": sot_share_home,
         }
+        features.update(self._stats_features(home_team, "Home"))
+        features.update(self._stats_features(away_team, "Away"))
+        return features
 
     def _update_state(
         self,
@@ -135,6 +188,7 @@ class FeatureBuilder:
         ftr: str,
         league_code: int,
         season: str,
+        stats: Optional[Dict[str, float]] = None,
     ) -> None:
         gd = fthg - ftag
         if ftr == "H":
@@ -204,6 +258,50 @@ class FeatureBuilder:
         self._latest_season[home_team] = season
         self._latest_season[away_team] = season
 
+        if stats:
+            hs = stats.get("HS", 0.0)
+            as_ = stats.get("AS", 0.0)
+            hst = stats.get("HST", 0.0)
+            ast = stats.get("AST", 0.0)
+            hc = stats.get("HC", 0.0)
+            ac = stats.get("AC", 0.0)
+            hy = stats.get("HY", 0.0)
+            ay = stats.get("AY", 0.0)
+
+            self._shots_for_5[home_team].append(hs)
+            self._shots_against_5[home_team].append(as_)
+            self._shots_for_10[home_team].append(hs)
+            self._shots_against_10[home_team].append(as_)
+            self._shots_for_5[away_team].append(as_)
+            self._shots_against_5[away_team].append(hs)
+            self._shots_for_10[away_team].append(as_)
+            self._shots_against_10[away_team].append(hs)
+
+            self._sot_for_5[home_team].append(hst)
+            self._sot_against_5[home_team].append(ast)
+            self._sot_for_10[home_team].append(hst)
+            self._sot_against_10[home_team].append(ast)
+            self._sot_for_5[away_team].append(ast)
+            self._sot_against_5[away_team].append(hst)
+            self._sot_for_10[away_team].append(ast)
+            self._sot_against_10[away_team].append(hst)
+
+            self._corners_for[home_team].append(hc)
+            self._corners_against[home_team].append(ac)
+            self._corners_for[away_team].append(ac)
+            self._corners_against[away_team].append(hc)
+
+            self._cards_5[home_team].append(hy)
+            self._cards_5[away_team].append(ay)
+
+            self._goals_total_5[home_team].append(float(fthg))
+            self._sot_total_5[home_team].append(hst)
+            self._goals_total_5[away_team].append(float(ftag))
+            self._sot_total_5[away_team].append(ast)
+
+            self._has_stats[home_team] = True
+            self._has_stats[away_team] = True
+
     def fit(self, history_df: pd.DataFrame) -> pd.DataFrame:
         if history_df.empty:
             return pd.DataFrame()
@@ -228,9 +326,18 @@ class FeatureBuilder:
             league_code = encode_league(row.get("League")) if "League" in df.columns else -1
             season = str(row.get("Season", "UNK")) if "Season" in df.columns else "UNK"
 
+            stats = None
+            if "HS" in df.columns:
+                stat_vals = {}
+                for sc in ["HS", "AS", "HST", "AST", "HF", "AF", "HC", "AC", "HY", "AY", "HR", "AR"]:
+                    if sc in df.columns:
+                        v = row.get(sc)
+                        stat_vals[sc] = float(v) if pd.notna(v) else 0.0
+                stats = stat_vals if stat_vals else None
+
             features = self._pre_match_features(ht, at, league_code, season)
             feature_rows.append(features)
-            self._update_state(ht, at, fthg, ftag, ftr, league_code, season)
+            self._update_state(ht, at, fthg, ftag, ftr, league_code, season, stats=stats)
 
         features_df = pd.DataFrame(feature_rows, index=df.index)
         for col in features_df.columns:

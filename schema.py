@@ -18,8 +18,7 @@ def encode_league(value) -> int:
     return LEAGUE_MAP.get(s, -1)
 
 
-# Single source of truth för feature-kontraktet (träning + inference)
-FEATURE_COLUMNS = [
+BASE_FEATURE_COLUMNS = [
     "HomeFormPts", "HomeFormGD", "AwayFormPts", "AwayFormGD",
     "HomeFormHome", "AwayFormAway",
     "HomeGoalsFor", "HomeGoalsAgainst", "AwayGoalsFor", "AwayGoalsAgainst",
@@ -28,11 +27,28 @@ FEATURE_COLUMNS = [
     "HomePosition", "AwayPosition", "PositionDiff",
     "HomeElo", "AwayElo",
     "League",
-    # Skade-features (håll stabilt även om 0)
     "InjuredPlayers_Home", "InjuredPlayers_Away",
     "KeyPlayersOut_Home", "KeyPlayersOut_Away",
     "InjurySeverity_Home", "InjurySeverity_Away",
 ]
+
+STATS_FEATURE_COLUMNS = [
+    "has_matchstats",
+    "SOTShareHome",
+    "HomeShots5", "HomeShotsAg5", "HomeShots10", "HomeShotsAg10",
+    "HomeSOT5", "HomeSOTAg5", "HomeSOT10", "HomeSOTAg10",
+    "HomeConversion", "HomeCornerShare", "HomeCardsRate",
+    "AwayShots5", "AwayShotsAg5", "AwayShots10", "AwayShotsAg10",
+    "AwaySOT5", "AwaySOTAg5", "AwaySOT10", "AwaySOTAg10",
+    "AwayConversion", "AwayCornerShare", "AwayCardsRate",
+]
+
+FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + STATS_FEATURE_COLUMNS
+
+ABLATION_GROUPS = {
+    "base": BASE_FEATURE_COLUMNS,
+    "+stats": BASE_FEATURE_COLUMNS + STATS_FEATURE_COLUMNS,
+}
 
 
 def proba_to_1x2(proba: Sequence[float], classes: Optional[Sequence[int]] = None) -> Dict[str, float]:
