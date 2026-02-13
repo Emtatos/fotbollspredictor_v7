@@ -1,12 +1,9 @@
 import json
 import platform
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-import pandas as pd
 
 MODEL_VERSION = "v8.0"
 METADATA_FILENAME = "metadata.json"
