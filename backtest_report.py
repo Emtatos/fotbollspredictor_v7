@@ -25,7 +25,7 @@ from sklearn.calibration import CalibratedClassifierCV
 
 from data_processing import normalize_csv_data
 from feature_engineering import create_features
-from model_handler import _init_xgb_classifier, _fit_with_optional_early_stopping
+from model_handler import _make_base_xgb
 from schema import FEATURE_COLUMNS, CLASS_MAP, encode_league
 from uncertainty import entropy_norm
 from trust import compute_trust_features, trust_score
@@ -81,15 +81,11 @@ def train_model(df_train: pd.DataFrame) -> Optional[CalibratedClassifierCV]:
     if len(X_val) < 10:
         X_val, y_val = X_train[-50:], y_train[-50:]
     
-    base_model = _init_xgb_classifier()
-    _fit_with_optional_early_stopping(base_model, X_train, y_train, X_val, y_val)
-    
-    # Calibrate with cross-validation
     calibrated_model = CalibratedClassifierCV(
-        estimator=_init_xgb_classifier(),
+        estimator=_make_base_xgb(),
         method="sigmoid",
         cv=3,
-        ensemble=False
+        ensemble=False,
     )
     calibrated_model.fit(X, y)
     
