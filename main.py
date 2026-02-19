@@ -7,9 +7,9 @@ import pandas as pd  # valfritt men praktiskt vid ev. debugging/inspektion
 from data_loader import download_season_data
 from data_processing import normalize_csv_data
 from feature_engineering import create_features
-from model_handler import train_and_save_model, load_model
+from model_handler import train_and_save_model, load_model, get_feature_columns, use_odds_features
 from metadata import generate_metadata
-from schema import FEATURE_COLUMNS
+from schema import ABLATION_GROUPS
 
 # Konfigurera en global logger för huvudskriptet
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -117,14 +117,20 @@ def run_pipeline(include_previous_seasons=True):
         if date_col is not None:
             date_range = (str(date_col.min()), str(date_col.max()))
 
+        with_odds = use_odds_features()
+        feat_cols = get_feature_columns(with_odds=with_odds)
         meta_path = generate_metadata(
             model_dir=model_path.parent,
-            features_list=list(FEATURE_COLUMNS),
+            features_list=feat_cols,
             calibration_method="sigmoid",
             train_size=len(df_features),
             dataset_leagues=LEAGUES,
             dataset_seasons=seasons,
             dataset_date_range=date_range,
+            extra={
+                "use_odds_features": with_odds,
+                "ablation_groups": list(ABLATION_GROUPS.keys()),
+            },
         )
         logger.info("Metadata sparad till: %s", meta_path)
     except Exception as e:
