@@ -1,0 +1,79 @@
+name: Release Smoke Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke-pipeline:
+    name: Smoke Pipeline + Artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run smoke pipeline (synthetic data)
+        run: python scripts/ci_smoke_pipeline.py
+
+      - name: Run smoke tests
+        run: pytest tests/test_smoke_pipeline.py -v --tb=short
+
+      - name: Streamlit import check
+        run: |
+          python -c "import streamlit; print('streamlit', streamlit.__version__)"
+          python -c "
+          import importlib, sys
+          mods = [
+              'schema', 'metadata', 'model_handler', 'feature_builder',
+              'feature_engineering', 'data_processing', 'data_loader',
+              'state', 'features', 'inference', 'trust', 'ui_utils', 'utils',
+          ]
+          for m in mods:
+              importlib.import_module(m)
+              print(f'  OK: {m}')
+          print('All app dependency modules import successfully')
+          "
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: model-artifacts
+          path: models/
+          retention-days: 30
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports
+          path: reports/
+          retention-days: 30
+
+      - name: Upload features parquet
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: features-data
+          path: data/features.parquet
+          retention-days: 30
