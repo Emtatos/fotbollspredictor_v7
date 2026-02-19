@@ -336,6 +336,8 @@ class FeatureBuilder:
                 stats = stat_vals if stat_vals else None
 
             features = self._pre_match_features(ht, at, league_code, season)
+            odds_feat = self._odds_features(row, df.columns)
+            features.update(odds_feat)
             feature_rows.append(features)
             self._update_state(ht, at, fthg, ftag, ftr, league_code, season, stats=stats)
 
@@ -356,12 +358,36 @@ class FeatureBuilder:
 
         return df
 
+    @staticmethod
+    def _odds_features(row: pd.Series, columns: pd.Index) -> Dict[str, float]:
+        _ODDS_PAIRS = [("B365H", "B365D", "B365A"), ("PSH", "PSD", "PSA")]
+        for h_col, d_col, a_col in _ODDS_PAIRS:
+            if h_col in columns and d_col in columns and a_col in columns:
+                oh = row.get(h_col)
+                od = row.get(d_col)
+                oa = row.get(a_col)
+                if pd.notna(oh) and pd.notna(od) and pd.notna(oa):
+                    oh, od, oa = float(oh), float(od), float(oa)
+                    if oh > 0 and od > 0 and oa > 0:
+                        raw_h = 1.0 / oh
+                        raw_d = 1.0 / od
+                        raw_a = 1.0 / oa
+                        total = raw_h + raw_d + raw_a
+                        return {
+                            "has_odds": 1.0,
+                            "ImpliedHome": raw_h / total,
+                            "ImpliedDraw": raw_d / total,
+                            "ImpliedAway": raw_a / total,
+                        }
+        return {"has_odds": 0.0, "ImpliedHome": 1 / 3, "ImpliedDraw": 1 / 3, "ImpliedAway": 1 / 3}
+
     def features_for_match(
         self,
         home_team: str,
         away_team: str,
         league: Optional[str] = None,
         season: Optional[str] = None,
+        odds: Optional[Dict[str, float]] = None,
     ) -> Optional[Dict[str, float]]:
         ht = normalize_team_name(home_team)
         at = normalize_team_name(away_team)
@@ -380,6 +406,13 @@ class FeatureBuilder:
         features["KeyPlayersOut_Away"] = 0
         features["InjurySeverity_Home"] = 0.0
         features["InjurySeverity_Away"] = 0.0
+
+        if odds:
+            row_series = pd.Series(odds)
+            odds_feat = self._odds_features(row_series, pd.Index(odds.keys()))
+        else:
+            odds_feat = {"has_odds": 0.0, "ImpliedHome": 1 / 3, "ImpliedDraw": 1 / 3, "ImpliedAway": 1 / 3}
+        features.update(odds_feat)
 
         return features
 
