@@ -636,10 +636,10 @@ with tab2:
 # ============================================================================
 
 with tab_odds:
-    st.header("Oddsverktyg — 1X2 Sannolikheter & Best Odds")
+    st.header("Oddsverktyg — 1X2 Sannolikheter, Value & Ranking")
     st.markdown(
-        "Beraknar implicita sannolikheter, overround-justerade fair-sannolikheter "
-        "och visar basta tillgangliga odds per utfall fran befintlig data."
+        "Beraknar implicita sannolikheter, overround-justerade fair-sannolikheter, "
+        "value-analys (edge & expected return) och rankar utfall efter edge."
     )
 
     from odds_tool import (
@@ -648,6 +648,29 @@ with tab_odds:
         build_reports_from_dataframe,
         extract_odds_from_row,
     )
+    from value_analysis import (
+        build_value_report,
+        rank_outcomes_by_edge,
+        rank_matches_by_interest,
+    )
+
+    # -------------------------------------------------------------------
+    # Forklaring av value-analys
+    # -------------------------------------------------------------------
+    with st.expander("Vad betyder value-analysen?", expanded=False):
+        st.markdown(
+            "**Positiv edge** innebar att jamforelsesannolikheten ar hogre an "
+            "marknadens fair probability for ett utfall. Det kan tyda pa att "
+            "oddsen ar generosa relativt marknaden.\n\n"
+            "**Negativ edge** innebar det motsatta — marknaden ger hogre "
+            "sannolikhet an jamforelsesannolikheten.\n\n"
+            "**Expected return** visar forvantad avkastning baserat pa "
+            "jamforelsesannolikheten och oddsen. Positivt varde antyder "
+            "att oddsen ar generosa.\n\n"
+            "*Detta ar ett beslutsstod, inte en garanti for vinst. "
+            "Value-analysen i denna version bygger pa marknadskonsensus "
+            "mellan bookmakers som jamforelsekalla.*"
+        )
 
     odds_mode = st.radio(
         "Valj inmatningsmetod:",
@@ -667,6 +690,33 @@ with tab_odds:
             manual_away = st.number_input("Borta (2)", min_value=1.01, value=3.60, step=0.05, key="m_away")
 
         manual_bm = st.text_input("Bookmaker (valfritt)", value="Manuell", key="m_bm")
+
+        # Valfri comparison probability for manuellt lage
+        use_manual_comp = st.checkbox(
+            "Ange egen jamforelsesannolikhet (valfritt)",
+            value=False,
+            key="use_manual_comp",
+        )
+        manual_comp_probs = None
+        if use_manual_comp:
+            st.caption(
+                "Ange dina egna sannolikheter for varje utfall. "
+                "De normaliseras automatiskt till 100%."
+            )
+            ccol1, ccol2, ccol3 = st.columns(3)
+            with ccol1:
+                comp_home = st.number_input("Hemma (1) %", min_value=0.0, max_value=100.0, value=45.0, step=1.0, key="c_home")
+            with ccol2:
+                comp_draw = st.number_input("Oavgjort (X) %", min_value=0.0, max_value=100.0, value=28.0, step=1.0, key="c_draw")
+            with ccol3:
+                comp_away = st.number_input("Borta (2) %", min_value=0.0, max_value=100.0, value=27.0, step=1.0, key="c_away")
+            total_comp = comp_home + comp_draw + comp_away
+            if total_comp > 0:
+                manual_comp_probs = {
+                    "1": comp_home / total_comp,
+                    "X": comp_draw / total_comp,
+                    "2": comp_away / total_comp,
+                }
 
         if st.button("Berakna", key="odds_calc", type="primary", use_container_width=True):
             entry = OddsEntry(bookmaker=manual_bm or "Manuell", home=manual_home, draw=manual_draw, away=manual_away)
@@ -699,9 +749,32 @@ with tab_odds:
                 }
                 st.dataframe(pd.DataFrame(odds_table), use_container_width=True, hide_index=True)
 
+                # Value-analys for manuellt lage
+                value_rpt = build_value_report(report, comparison_probs=manual_comp_probs)
+                if value_rpt is not None and manual_comp_probs is not None:
+                    st.subheader("Value-analys")
+                    st.caption(f"Jamforelsekalla: {value_rpt.comparison_source}")
+                    value_rows = []
+                    for ov in value_rpt.outcomes:
+                        label = {"1": "Hemma (1)", "X": "Oavgjort (X)", "2": "Borta (2)"}[ov.outcome]
+                        value_rows.append({
+                            "Utfall": label,
+                            "Odds": f"{ov.odds:.2f}",
+                            "Market fair prob": f"{ov.market_fair_prob:.1%}",
+                            "Comparison prob": f"{ov.comparison_prob:.1%}",
+                            "Edge": f"{ov.edge:+.1%}",
+                            "Expected return": f"{ov.expected_return:+.1%}",
+                            "Bedomning": ov.edge_label,
+                        })
+                    st.dataframe(pd.DataFrame(value_rows), use_container_width=True, hide_index=True)
+                elif manual_comp_probs is None:
+                    st.info(
+                        "Ange en egen jamforelsesannolikhet ovan for att se value-analys. "
+                        "Med en enda bookmaker finns ingen marknadskonsensus att jamfora mot."
+                    )
+
                 st.caption(
-                    "Fair-sannolikheter ar overround-justerade (normaliserade till 100%). "
-                    "Framtida version: value-berakning, streckjamforelse, tipset-ranking."
+                    "Fair-sannolikheter ar overround-justerade (normaliserade till 100%)."
                 )
 
     else:
@@ -733,8 +806,89 @@ with tab_odds:
                 if not reports:
                     st.warning("Inga giltiga odds hittades i de valda matcherna.")
                 else:
+                    # Bygg value-rapporter for alla matcher
+                    value_reports = []
                     for rpt in reports:
-                        with st.expander(f"{rpt.home_team} vs {rpt.away_team}  |  Overround: {rpt.overround:.1f}%"):
+                        vr = build_value_report(rpt)
+                        if vr is not None:
+                            value_reports.append((rpt, vr))
+
+                    # Rangordna matcher efter intresse (hogst edge forst)
+                    if value_reports:
+                        vr_list = [vr for _, vr in value_reports]
+                        ranked_vr = rank_matches_by_interest(vr_list)
+                        # Bygg lookup for att matcha tillbaka
+                        vr_to_rpt = {id(vr): rpt for rpt, vr in value_reports}
+
+                        # -----------------------------------------------
+                        # Ranking-tabell: mest intressanta utfall
+                        # -----------------------------------------------
+                        st.subheader("Ranking — mest intressanta utfall")
+                        ranked_outcomes = rank_outcomes_by_edge(vr_list)
+
+                        # Visa topp-10 positiva och topp-5 negativa
+                        positive_outcomes = [r for r in ranked_outcomes if r[2].edge > 0.001]
+                        negative_outcomes = [r for r in ranked_outcomes if r[2].edge < -0.001]
+
+                        if positive_outcomes:
+                            st.markdown("**Hogst positiv edge:**")
+                            pos_rows = []
+                            for match_label, outcome_label, ov in positive_outcomes[:10]:
+                                pos_rows.append({
+                                    "Match": match_label,
+                                    "Utfall": outcome_label,
+                                    "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                    "Edge": f"{ov.edge:+.1%}",
+                                    "Exp. return": f"{ov.expected_return:+.1%}",
+                                    "Bedomning": ov.edge_label,
+                                })
+                            st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
+
+                        if negative_outcomes:
+                            st.markdown("**Mest negativa edge:**")
+                            neg_rows = []
+                            # Sortera negativa fran mest negativ forst
+                            for match_label, outcome_label, ov in reversed(negative_outcomes[-5:]):
+                                neg_rows.append({
+                                    "Match": match_label,
+                                    "Utfall": outcome_label,
+                                    "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                    "Edge": f"{ov.edge:+.1%}",
+                                    "Exp. return": f"{ov.expected_return:+.1%}",
+                                    "Bedomning": ov.edge_label,
+                                })
+                            st.dataframe(pd.DataFrame(neg_rows), use_container_width=True, hide_index=True)
+
+                        if not positive_outcomes and not negative_outcomes:
+                            st.info("Ingen tydlig edge hittades bland aktuella matcher.")
+
+                        st.divider()
+
+                    # -----------------------------------------------
+                    # Detaljvy per match (rankad efter intresse)
+                    # -----------------------------------------------
+                    st.subheader("Detaljerad analys per match")
+
+                    # Visa matcher i intresseordning om ranking finns
+                    if value_reports:
+                        display_order = [(vr_to_rpt.get(id(vr), rpt), vr) for vr in ranked_vr for rpt, _ in value_reports if id(_) == id(vr)]
+                        if not display_order:
+                            display_order = value_reports
+                    else:
+                        display_order = [(rpt, None) for rpt in reports]
+
+                    for rpt, vr in display_order:
+                        # Bygg expander-etikett med edge-info
+                        if vr is not None and vr.outcomes:
+                            max_edge = max(ov.edge for ov in vr.outcomes)
+                            edge_hint = f"  |  Hogsta edge: {max_edge:+.1%}" if abs(max_edge) > 0.001 else ""
+                        else:
+                            edge_hint = ""
+
+                        with st.expander(
+                            f"{rpt.home_team} vs {rpt.away_team}  |  "
+                            f"Overround: {rpt.overround:.1f}%{edge_hint}"
+                        ):
                             num_bm = len(rpt.bookmaker_odds)
 
                             # Bookmaker odds table
@@ -748,21 +902,39 @@ with tab_odds:
                                 })
                             st.dataframe(pd.DataFrame(bm_rows), use_container_width=True, hide_index=True)
 
-                            # Probabilities
-                            prob_table = {
-                                "Utfall": ["Hemma (1)", "Oavgjort (X)", "Borta (2)"],
-                                "Implicit sannol.": [
-                                    f"{rpt.implied_probs['1']:.1%}",
-                                    f"{rpt.implied_probs['X']:.1%}",
-                                    f"{rpt.implied_probs['2']:.1%}",
-                                ],
-                                "Fair sannol.": [
-                                    f"{rpt.fair_probs['1']:.1%}",
-                                    f"{rpt.fair_probs['X']:.1%}",
-                                    f"{rpt.fair_probs['2']:.1%}",
-                                ],
-                            }
-                            st.dataframe(pd.DataFrame(prob_table), use_container_width=True, hide_index=True)
+                            # Value-analys per utfall
+                            if vr is not None:
+                                st.markdown("**Value-analys:**")
+                                st.caption(f"Jamforelsekalla: {vr.comparison_source}")
+                                value_rows = []
+                                for ov in vr.outcomes:
+                                    label = {"1": "Hemma (1)", "X": "Oavgjort (X)", "2": "Borta (2)"}[ov.outcome]
+                                    value_rows.append({
+                                        "Utfall": label,
+                                        "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                        "Market fair prob": f"{ov.market_fair_prob:.1%}",
+                                        "Comparison prob": f"{ov.comparison_prob:.1%}",
+                                        "Edge": f"{ov.edge:+.1%}",
+                                        "Expected return": f"{ov.expected_return:+.1%}",
+                                        "Bedomning": ov.edge_label,
+                                    })
+                                st.dataframe(pd.DataFrame(value_rows), use_container_width=True, hide_index=True)
+                            else:
+                                # Fallback: visa bara sannolikheter
+                                prob_table = {
+                                    "Utfall": ["Hemma (1)", "Oavgjort (X)", "Borta (2)"],
+                                    "Implicit sannol.": [
+                                        f"{rpt.implied_probs['1']:.1%}",
+                                        f"{rpt.implied_probs['X']:.1%}",
+                                        f"{rpt.implied_probs['2']:.1%}",
+                                    ],
+                                    "Fair sannol.": [
+                                        f"{rpt.fair_probs['1']:.1%}",
+                                        f"{rpt.fair_probs['X']:.1%}",
+                                        f"{rpt.fair_probs['2']:.1%}",
+                                    ],
+                                }
+                                st.dataframe(pd.DataFrame(prob_table), use_container_width=True, hide_index=True)
 
                             # Best odds
                             if num_bm > 1 and rpt.best_odds:
@@ -775,12 +947,13 @@ with tab_odds:
                             elif num_bm == 1:
                                 st.caption(
                                     f"Endast en bookmaker ({rpt.bookmaker_odds[0].bookmaker}) — "
-                                    "best-odds-jamforelse kraver fler kallor."
+                                    "value-analys kraver fler bookmakers for marknadskonsensus."
                                 )
 
                     st.caption(
-                        "Framtida tillagg: value-berakning mot modellsannolikheter, "
-                        "streckjamforelse, tipset-ranking."
+                        "Value-analysen i denna version bygger pa marknadskonsensus "
+                        "mellan bookmakers. Framtida tillagg: modellsannolikheter, "
+                        "streckjamforelse."
                     )
 
 # ============================================================================
