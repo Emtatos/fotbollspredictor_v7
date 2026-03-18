@@ -405,7 +405,7 @@ if not model or df_features is None or not all_teams:
         st.stop()
 
 # Skapa flikar för olika funktioner
-tab1, tab2, tab3 = st.tabs(["🎯 Enskild Match", "📋 Flera Matcher", "ℹ️ Om Appen"])
+tab1, tab2, tab_odds, tab3 = st.tabs(["🎯 Enskild Match", "📋 Flera Matcher", "📈 Oddsverktyg", "ℹ️ Om Appen"])
 
 # ============================================================================
 # FLIK 1: ENSKILD MATCH
@@ -630,6 +630,158 @@ with tab2:
                 st.subheader("📝 Tipsrad för kopiering")
                 tipsrad = "".join([r["Tips"] for r in results if r["Tips"] != "?"])
                 st.code(tipsrad, language=None)
+
+# ============================================================================
+# FLIK: ODDSVERKTYG
+# ============================================================================
+
+with tab_odds:
+    st.header("Oddsverktyg — 1X2 Sannolikheter & Best Odds")
+    st.markdown(
+        "Beraknar implicita sannolikheter, overround-justerade fair-sannolikheter "
+        "och visar basta tillgangliga odds per utfall fran befintlig data."
+    )
+
+    from odds_tool import (
+        OddsEntry,
+        build_match_report,
+        build_reports_from_dataframe,
+        extract_odds_from_row,
+    )
+
+    odds_mode = st.radio(
+        "Valj inmatningsmetod:",
+        ["Manuell (skriv in odds)", "Fran data (historiska matcher)"],
+        key="odds_mode",
+        horizontal=True,
+    )
+
+    if odds_mode == "Manuell (skriv in odds)":
+        st.subheader("Ange 1X2-odds")
+        ocol1, ocol2, ocol3 = st.columns(3)
+        with ocol1:
+            manual_home = st.number_input("Hemma (1)", min_value=1.01, value=2.10, step=0.05, key="m_home")
+        with ocol2:
+            manual_draw = st.number_input("Oavgjort (X)", min_value=1.01, value=3.40, step=0.05, key="m_draw")
+        with ocol3:
+            manual_away = st.number_input("Borta (2)", min_value=1.01, value=3.60, step=0.05, key="m_away")
+
+        manual_bm = st.text_input("Bookmaker (valfritt)", value="Manuell", key="m_bm")
+
+        if st.button("Berakna", key="odds_calc", type="primary", use_container_width=True):
+            entry = OddsEntry(bookmaker=manual_bm or "Manuell", home=manual_home, draw=manual_draw, away=manual_away)
+            report = build_match_report("Hemmalag", "Bortalag", [entry])
+            if report is None:
+                st.error("Ogiltiga odds — alla varden maste vara > 1.0")
+            else:
+                st.subheader("Resultat")
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.metric("Overround", f"{report.overround:.1f}%")
+                with col_b:
+                    num_bm = len(report.bookmaker_odds)
+                    st.metric("Bookmakers", str(num_bm))
+
+                odds_table = {
+                    "Utfall": ["Hemma (1)", "Oavgjort (X)", "Borta (2)"],
+                    "Odds": [f"{entry.home:.2f}", f"{entry.draw:.2f}", f"{entry.away:.2f}"],
+                    "Implicit sannol.": [
+                        f"{report.implied_probs['1']:.1%}",
+                        f"{report.implied_probs['X']:.1%}",
+                        f"{report.implied_probs['2']:.1%}",
+                    ],
+                    "Fair sannol.": [
+                        f"{report.fair_probs['1']:.1%}",
+                        f"{report.fair_probs['X']:.1%}",
+                        f"{report.fair_probs['2']:.1%}",
+                    ],
+                }
+                st.dataframe(pd.DataFrame(odds_table), use_container_width=True, hide_index=True)
+
+                st.caption(
+                    "Fair-sannolikheter ar overround-justerade (normaliserade till 100%). "
+                    "Framtida version: value-berakning, streckjamforelse, tipset-ranking."
+                )
+
+    else:
+        st.subheader("Analysera odds fran historisk data")
+        if df_features is None or df_features.empty:
+            st.warning("Ingen feature-data laddad. Kor pipeline forst.")
+        else:
+            # Check if odds columns exist
+            odds_cols_present = any(
+                all(c in df_features.columns for c in (h, d, a))
+                for h, d, a, _ in [
+                    ("B365H", "B365D", "B365A", "Bet365"),
+                    ("PSH", "PSD", "PSA", "Pinnacle"),
+                ]
+            )
+            if not odds_cols_present:
+                st.info(
+                    "Ingen odds-data hittades i den laddade datan. "
+                    "CSV-filer fran football-data.co.uk innehaller normalt odds-kolumner "
+                    "(B365H, B365D, B365A etc). Kor pipeline med ratt data for att se odds."
+                )
+            else:
+                n_rows = min(len(df_features), 50)
+                st.info(f"Visar de senaste {n_rows} matcherna med tillgangliga odds.")
+
+                recent = df_features.tail(n_rows).iloc[::-1]
+                reports = build_reports_from_dataframe(recent)
+
+                if not reports:
+                    st.warning("Inga giltiga odds hittades i de valda matcherna.")
+                else:
+                    for rpt in reports:
+                        with st.expander(f"{rpt.home_team} vs {rpt.away_team}  |  Overround: {rpt.overround:.1f}%"):
+                            num_bm = len(rpt.bookmaker_odds)
+
+                            # Bookmaker odds table
+                            bm_rows = []
+                            for e in rpt.bookmaker_odds:
+                                bm_rows.append({
+                                    "Bookmaker": e.bookmaker,
+                                    "1 (Hemma)": f"{e.home:.2f}",
+                                    "X (Oavgjort)": f"{e.draw:.2f}",
+                                    "2 (Borta)": f"{e.away:.2f}",
+                                })
+                            st.dataframe(pd.DataFrame(bm_rows), use_container_width=True, hide_index=True)
+
+                            # Probabilities
+                            prob_table = {
+                                "Utfall": ["Hemma (1)", "Oavgjort (X)", "Borta (2)"],
+                                "Implicit sannol.": [
+                                    f"{rpt.implied_probs['1']:.1%}",
+                                    f"{rpt.implied_probs['X']:.1%}",
+                                    f"{rpt.implied_probs['2']:.1%}",
+                                ],
+                                "Fair sannol.": [
+                                    f"{rpt.fair_probs['1']:.1%}",
+                                    f"{rpt.fair_probs['X']:.1%}",
+                                    f"{rpt.fair_probs['2']:.1%}",
+                                ],
+                            }
+                            st.dataframe(pd.DataFrame(prob_table), use_container_width=True, hide_index=True)
+
+                            # Best odds
+                            if num_bm > 1 and rpt.best_odds:
+                                st.markdown("**Basta odds per utfall:**")
+                                for outcome in ["1", "X", "2"]:
+                                    if outcome in rpt.best_odds:
+                                        oval, obm = rpt.best_odds[outcome]
+                                        label = {"1": "Hemma", "X": "Oavgjort", "2": "Borta"}[outcome]
+                                        st.write(f"- {label} ({outcome}): **{oval:.2f}** ({obm})")
+                            elif num_bm == 1:
+                                st.caption(
+                                    f"Endast en bookmaker ({rpt.bookmaker_odds[0].bookmaker}) — "
+                                    "best-odds-jamforelse kraver fler kallor."
+                                )
+
+                    st.caption(
+                        "Framtida tillagg: value-berakning mot modellsannolikheter, "
+                        "streckjamforelse, tipset-ranking."
+                    )
 
 # ============================================================================
 # FLIK 3: OM APPEN
