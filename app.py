@@ -24,8 +24,7 @@ from ui_utils import get_halfguard_sign, pick_half_guards, parse_match_input, ca
 from utils import normalize_team_name, set_canonical_teams, get_canonical_teams
 
 # Konsistenta inference-moduler
-from state import build_current_team_states
-from features import compute_h2h
+from feature_builder import FeatureBuilder
 from inference import build_feature_row, predict_match as infer_predict_match
 from schema import FEATURE_COLUMNS
 from trust import compute_trust_features, trust_score
@@ -78,9 +77,17 @@ logger = logging.getLogger(__name__)
 @st.cache_resource(show_spinner="Laddar maskininlärningsmodell...")
 def load_cached_model(model_path: Path) -> Optional[XGBClassifier]:
     """Laddar modellen med caching för prestanda"""
-    if not model_path.exists():
-        return None
     return load_model(model_path)
+
+
+@st.cache_resource(show_spinner="Bygger FeatureBuilder...")
+def _get_feature_builder(_df_features: pd.DataFrame) -> Optional[FeatureBuilder]:
+    """Skapar och cachar en FeatureBuilder-instans baserad på historisk data."""
+    if _df_features is None or _df_features.empty:
+        return None
+    builder = FeatureBuilder()
+    builder.fit(_df_features)
+    return builder
 
 
 @st.cache_data(show_spinner="Laddar historisk data för lag...")
@@ -149,103 +156,62 @@ def predict_match(
     df_features: pd.DataFrame
 ) -> Optional[Tuple[np.ndarray, dict]]:
     """
-    Gör en prediktion för en match med konsekvent feature-kontrakt.
+    Gör en prediktion för en match via FeatureBuilder.features_for_match().
 
-    Fixar:
-      - använder current state (replay) i stället för senaste matchrad
-      - räknar H2H för rätt lagpar
-      - garanterar att predict_proba tolkas som [1, X, 2]
+    Använder samma feature-logik som träningsvägen för att undvika
+    train/inference-mismatch.
     """
     if df_features is None or df_features.empty:
         return None
 
-    # Normalisera lagnamn för lookup
+    builder = _get_feature_builder(df_features)
+    if builder is None:
+        return None
+
     home_team_n = normalize_team_name(home_team)
     away_team_n = normalize_team_name(away_team)
 
-    hist_need = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"]
-    if any(c not in df_features.columns for c in hist_need):
-        logger.error("df_features saknar nödvändiga kolumner för prediktion: %s",
-                     [c for c in hist_need if c not in df_features.columns])
+    feature_dict = builder.features_for_match(home_team_n, away_team_n)
+    if feature_dict is None:
         return None
 
-    hist = df_features.copy()
-    hist["HomeTeam"] = hist["HomeTeam"].apply(normalize_team_name)
-    hist["AwayTeam"] = hist["AwayTeam"].apply(normalize_team_name)
-
-    states = build_current_team_states(hist)
-    hs = states.get(home_team_n)
-    as_ = states.get(away_team_n)
-    if hs is None or as_ is None:
-        return None
-
-    h2h_hw, h2h_d, h2h_aw, h2h_gd = compute_h2h(hist, home_team_n, away_team_n)
-
-    # Compute trust score
-    trust_features = compute_trust_features(
-        home_state=hs,
-        away_state=as_,
-        h2h_home_wins=h2h_hw,
-        h2h_draws=h2h_d,
-        h2h_away_wins=h2h_aw,
-        league_code=hs.get("League", -1),
-    )
-    trust_score_val, trust_label = trust_score(trust_features)
-
-    # Injury features (default 0; uppdateras om scraper finns)
-    injury_features = {
-        "InjuredPlayers_Home": 0,
-        "InjuredPlayers_Away": 0,
-        "KeyPlayersOut_Home": 0,
-        "KeyPlayersOut_Away": 0,
-        "InjurySeverity_Home": 0.0,
-        "InjurySeverity_Away": 0.0,
-    }
+    # Defensiv komplettering av skade-features om scraper finns
     if HAS_INJURY_SCRAPER:
         try:
-            injury_features = get_injury_features_for_match(home_team_n, away_team_n)
+            inj = get_injury_features_for_match(home_team_n, away_team_n)
+            feature_dict.update(inj)
         except Exception as e:
             logger.warning(f"Kunde inte hämta skade-features: {e}")
-
-    feature_dict = {
-        "HomeFormPts": hs["FormPts"],
-        "HomeFormGD": hs["FormGD"],
-        "AwayFormPts": as_["FormPts"],
-        "AwayFormGD": as_["FormGD"],
-        "HomeFormHome": hs["FormHome"],
-        "AwayFormAway": as_["FormAway"],
-        "HomeGoalsFor": hs["GoalsFor"],
-        "HomeGoalsAgainst": hs["GoalsAgainst"],
-        "AwayGoalsFor": as_["GoalsFor"],
-        "AwayGoalsAgainst": as_["GoalsAgainst"],
-        "HomeStreak": hs["Streak"],
-        "AwayStreak": as_["Streak"],
-        "H2H_HomeWins": h2h_hw,
-        "H2H_Draws": h2h_d,
-        "H2H_AwayWins": h2h_aw,
-        "H2H_HomeGoalDiff": h2h_gd,
-        "HomePosition": hs["Position"],
-        "AwayPosition": as_["Position"],
-        "PositionDiff": as_["Position"] - hs["Position"],  # samma definition som i feature_engineering
-        "HomeElo": hs["Elo"],
-        "AwayElo": as_["Elo"],
-        "League": hs.get("League", -1),
-        **injury_features,
-    }
 
     row_df = build_feature_row(feature_dict)
     probs_map = infer_predict_match(model, row_df)  # {"1","X","2"}
     probs = np.array([probs_map["1"], probs_map["X"], probs_map["2"]], dtype=float)
 
+    # Compute trust score from builder state
+    hs = builder.get_team_state(home_team_n)
+    as_ = builder.get_team_state(away_team_n)
+    h2h_hw = int(feature_dict.get("H2H_HomeWins", 0))
+    h2h_d = int(feature_dict.get("H2H_Draws", 0))
+    h2h_aw = int(feature_dict.get("H2H_AwayWins", 0))
+    trust_features = compute_trust_features(
+        home_state=hs or {},
+        away_state=as_ or {},
+        h2h_home_wins=h2h_hw,
+        h2h_draws=h2h_d,
+        h2h_away_wins=h2h_aw,
+        league_code=int(feature_dict.get("League", -1)),
+    )
+    trust_score_val, trust_label = trust_score(trust_features)
+
     stats = {
-        "home_form_pts": hs["FormPts"],
-        "home_form_gd": hs["FormGD"],
-        "home_elo": hs["Elo"],
-        "away_form_pts": as_["FormPts"],
-        "away_form_gd": as_["FormGD"],
-        "away_elo": as_["Elo"],
-        "home_goals_for": hs["GoalsFor"],
-        "away_goals_for": as_["GoalsFor"],
+        "home_form_pts": feature_dict.get("HomeFormPts", 0),
+        "home_form_gd": feature_dict.get("HomeFormGD", 0),
+        "home_elo": feature_dict.get("HomeElo", 1500),
+        "away_form_pts": feature_dict.get("AwayFormPts", 0),
+        "away_form_gd": feature_dict.get("AwayFormGD", 0),
+        "away_elo": feature_dict.get("AwayElo", 1500),
+        "home_goals_for": feature_dict.get("HomeGoalsFor", 0),
+        "away_goals_for": feature_dict.get("AwayGoalsFor", 0),
         "trust_score": trust_score_val,
         "trust_label": trust_label,
     }
