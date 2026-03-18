@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from odds_tool import MatchOddsReport, remove_overround
+from odds_tool import MatchOddsReport
 
 logger = logging.getLogger(__name__)
 
