@@ -30,7 +30,7 @@ import pandas as pd
 from sklearn.metrics import log_loss, accuracy_score
 
 from backtest_report import load_data, train_model
-from schema import FEATURE_COLUMNS, CLASS_MAP, encode_league
+from schema import FEATURE_COLUMNS, ALL_FEATURE_COLUMNS, ODDS_FEATURE_COLUMNS, CLASS_MAP, encode_league
 
 logging.basicConfig(
     level=logging.INFO,
@@ -215,23 +215,31 @@ def encode_target(df: pd.DataFrame) -> np.ndarray:
     return df["FTR"].map(CLASS_MAP).values
 
 
-def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_features(df: pd.DataFrame, feature_columns: list = None) -> pd.DataFrame:
     """Prepare feature matrix from a df that already has feature columns."""
+    if feature_columns is None:
+        feature_columns = FEATURE_COLUMNS
     df_local = df.copy()
     if "League" in df_local.columns:
         df_local["League"] = df_local["League"].apply(encode_league)
-    for c in FEATURE_COLUMNS:
+    for c in feature_columns:
         if c not in df_local.columns:
             df_local[c] = 0
-    return df_local[FEATURE_COLUMNS]
+    return df_local[feature_columns]
 
 
 # ---------------------------------------------------------------------------
 # Main benchmark
 # ---------------------------------------------------------------------------
 
-def run_benchmark(df: pd.DataFrame) -> dict:
-    """Run the full benchmark and return results dict."""
+def run_benchmark(df: pd.DataFrame, with_odds: bool = False) -> dict:
+    """Run the full benchmark and return results dict.
+
+    Args:
+        df: Full dataset with features already computed.
+        with_odds: If True, also train/eval a model variant that includes
+                   odds-derived features (ImpliedHome/Draw/Away, has_odds).
+    """
     logger.info("Total matches loaded: %d", len(df))
 
     df_train, df_test = prepare_temporal_split(df, test_fraction=0.333)
@@ -265,17 +273,52 @@ def run_benchmark(df: pd.DataFrame) -> dict:
         "models": {},
     }
 
-    # --- 1. Main model (calibrated XGBoost) ---
-    logger.info("Training main model (calibrated XGBoost)...")
-    model = train_model(df_train)
+    # --- 1. Main model WITHOUT odds (calibrated XGBoost) ---
+    logger.info("Training main model WITHOUT odds (calibrated XGBoost)...")
+    model = train_model(df_train, feature_columns=list(FEATURE_COLUMNS))
     if model is not None:
-        X_test = prepare_features(df_test)
+        X_test = prepare_features(df_test, feature_columns=list(FEATURE_COLUMNS))
         y_proba_main = model.predict_proba(X_test)
         results["models"]["main_model"] = compute_all_metrics(y_test, y_proba_main)
         logger.info("Main model metrics: %s", results["models"]["main_model"])
     else:
         logger.error("Main model training failed!")
         results["models"]["main_model"] = {"error": "training failed"}
+
+    # --- 1b. Main model WITH odds (if requested) ---
+    model_odds = None
+    y_proba_odds = None
+    if with_odds:
+        logger.info("Training main model WITH odds features...")
+
+        # Check how many test matches actually have odds
+        if "has_odds" in df_test.columns:
+            odds_available = (df_test["has_odds"].fillna(0).astype(float) > 0.5).sum()
+        else:
+            odds_available = 0
+        logger.info(
+            "Odds availability in test set: %d / %d matches (%.1f%%)",
+            odds_available, n_test, 100.0 * odds_available / n_test if n_test else 0,
+        )
+
+        model_odds = train_model(df_train, feature_columns=list(ALL_FEATURE_COLUMNS))
+        if model_odds is not None:
+            X_test_odds = prepare_features(df_test, feature_columns=list(ALL_FEATURE_COLUMNS))
+            y_proba_odds = model_odds.predict_proba(X_test_odds)
+            results["models"]["main_model_with_odds"] = compute_all_metrics(
+                y_test, y_proba_odds
+            )
+            results["models"]["main_model_with_odds"]["note"] = (
+                f"Trained/evaluated with odds features. "
+                f"{odds_available}/{n_test} test matches had real odds data."
+            )
+            logger.info(
+                "Main model WITH odds metrics: %s",
+                results["models"]["main_model_with_odds"],
+            )
+        else:
+            logger.error("Main model WITH odds training failed!")
+            results["models"]["main_model_with_odds"] = {"error": "training failed"}
 
     # --- 2. Home-favoring baseline ---
     logger.info("Computing home-favoring baseline...")
@@ -310,22 +353,44 @@ def run_benchmark(df: pd.DataFrame) -> dict:
         )
         logger.info("Bookmaker metrics: %s", results["models"]["bookmaker_implied"])
 
-        # Also re-evaluate other models on the same odds-only subset for fair comparison
-        results["models"]["main_model_odds_subset"] = compute_all_metrics(
-            y_test_bm, y_proba_main[bm_mask]
-        ) if model is not None else {"error": "no model"}
-        results["models"]["main_model_odds_subset"]["note"] = (
-            "Main model evaluated on same odds-only subset for fair comparison"
-        )
+        # Also re-evaluate main models on the same odds-only subset for fair comparison
+        if model is not None:
+            results["models"]["main_model_odds_subset"] = compute_all_metrics(
+                y_test_bm, y_proba_main[bm_mask]
+            )
+            results["models"]["main_model_odds_subset"]["note"] = (
+                "Main model (no odds) evaluated on same odds-only subset for fair comparison"
+            )
+        if with_odds and model_odds is not None and y_proba_odds is not None:
+            results["models"]["main_model_with_odds_subset"] = compute_all_metrics(
+                y_test_bm, y_proba_odds[bm_mask]
+            )
+            results["models"]["main_model_with_odds_subset"]["note"] = (
+                "Main model (with odds) evaluated on same odds-only subset for fair comparison"
+            )
     else:
         logger.info("No usable bookmaker odds data found in test set. Skipping.")
         results["models"]["bookmaker_implied"] = {
             "note": "Not included - no odds data available in test set"
         }
 
-    # --- Calibration summary for main model ---
+    # --- Calibration summaries ---
     if model is not None:
         results["calibration"] = calibration_summary(y_test, y_proba_main)
+    if with_odds and model_odds is not None and y_proba_odds is not None:
+        results["calibration_with_odds"] = calibration_summary(y_test, y_proba_odds)
+
+    # --- A/B delta summary (with_odds mode) ---
+    if with_odds:
+        a_metrics = results["models"].get("main_model", {})
+        b_metrics = results["models"].get("main_model_with_odds", {})
+        if "log_loss" in a_metrics and "log_loss" in b_metrics:
+            results["ab_delta"] = {
+                "log_loss_delta": round(b_metrics["log_loss"] - a_metrics["log_loss"], 4),
+                "brier_delta": round(b_metrics["brier"] - a_metrics["brier"], 4),
+                "accuracy_delta": round(b_metrics["accuracy"] - a_metrics["accuracy"], 4),
+                "note": "Negative log_loss/brier delta = odds variant is better. Positive accuracy delta = odds variant is better.",
+            }
 
     return results
 
@@ -373,29 +438,40 @@ def print_report(results: dict) -> None:
             print(f"     {note}")
 
     # Odds subset comparison (if available)
-    if "main_model_odds_subset" in results["models"]:
-        m_sub = results["models"]["main_model_odds_subset"]
-        if "log_loss" in m_sub:
-            print("\n  --- Fair comparison on odds-only subset ---")
-            for name, m in [("main_model (odds subset)", m_sub),
-                            ("bookmaker_implied", results["models"]["bookmaker_implied"])]:
-                if "log_loss" in m:
-                    print(
-                        f"  {name:<26} {m['log_loss']:>10.4f} {m['brier']:>10.4f} "
-                        f"{m['accuracy']:>10.4f} {m['n_matches']:>6}"
-                    )
+    odds_subset_models = [
+        ("main_model (odds subset)", "main_model_odds_subset"),
+        ("main+odds (odds subset)", "main_model_with_odds_subset"),
+        ("bookmaker_implied", "bookmaker_implied"),
+    ]
+    has_subset = any(
+        k in results["models"] and "log_loss" in results["models"][k]
+        for _, k in odds_subset_models
+    )
+    if has_subset:
+        print("\n  --- Fair comparison on odds-only subset ---")
+        for label, key in odds_subset_models:
+            m = results["models"].get(key, {})
+            if "log_loss" in m:
+                print(
+                    f"  {label:<28} {m['log_loss']:>10.4f} {m['brier']:>10.4f} "
+                    f"{m['accuracy']:>10.4f} {m['n_matches']:>6}"
+                )
 
     # Calibration
-    if "calibration" in results:
-        print("\n" + "-" * 72)
-        print("  Calibration Summary (Main Model)")
-        print("-" * 72)
-        print(f"  {'Bin':<14} {'Count':>8} {'Avg Conf':>12} {'Avg Acc':>12}")
-        for row in results["calibration"]:
-            print(
-                f"  {row['bin']:<14} {row['count']:>8} "
-                f"{row['avg_confidence']:>12.4f} {row['avg_accuracy']:>12.4f}"
-            )
+    for cal_key, cal_label in [
+        ("calibration", "Main Model (no odds)"),
+        ("calibration_with_odds", "Main Model (with odds)"),
+    ]:
+        if cal_key in results:
+            print("\n" + "-" * 72)
+            print(f"  Calibration Summary ({cal_label})")
+            print("-" * 72)
+            print(f"  {'Bin':<14} {'Count':>8} {'Avg Conf':>12} {'Avg Acc':>12}")
+            for row in results[cal_key]:
+                print(
+                    f"  {row['bin']:<14} {row['count']:>8} "
+                    f"{row['avg_confidence']:>12.4f} {row['avg_accuracy']:>12.4f}"
+                )
 
     print("\n" + "=" * 72)
     print("  RANKING (by log loss, lower is better):")
@@ -434,6 +510,22 @@ def print_report(results: dict) -> None:
         else:
             print("  VERDICT: Could not determine ranking (main model may have failed).")
 
+    # --- A/B Delta Summary ---
+    if "ab_delta" in results:
+        d = results["ab_delta"]
+        print("\n" + "=" * 72)
+        print("  A/B COMPARISON: main_model (no odds) vs main_model_with_odds")
+        print("=" * 72)
+        print(f"  Log loss delta (B - A): {d['log_loss_delta']:+.4f}")
+        print(f"  Brier delta   (B - A): {d['brier_delta']:+.4f}")
+        print(f"  Accuracy delta(B - A): {d['accuracy_delta']:+.4f}")
+        if d["log_loss_delta"] < -0.005:
+            print("  => Odds features IMPROVE the model (lower log loss).")
+        elif d["log_loss_delta"] > 0.005:
+            print("  => Odds features HURT the model (higher log loss).")
+        else:
+            print("  => Odds features have NEGLIGIBLE effect on log loss.")
+
     print("=" * 72 + "\n")
 
 
@@ -450,6 +542,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Download fresh data instead of using cache",
     )
+    parser.add_argument(
+        "--with-odds",
+        action="store_true",
+        help="Also benchmark a model variant trained WITH odds features (A/B comparison)",
+    )
     return parser.parse_args()
 
 
@@ -458,14 +555,17 @@ def main() -> int:
     refresh = args.refresh_data or os.environ.get(
         "BACKTEST_REFRESH_DATA", ""
     ).lower() in ("1", "true", "yes")
+    with_odds = args.with_odds or os.environ.get(
+        "BENCHMARK_WITH_ODDS", ""
+    ).lower() in ("1", "true", "yes")
 
-    logger.info("Loading data (refresh=%s)...", refresh)
+    logger.info("Loading data (refresh=%s, with_odds=%s)...", refresh, with_odds)
     df = load_data(refresh=refresh)
     if df.empty:
         logger.error("No data loaded. Run with --refresh-data to download.")
         return 1
 
-    results = run_benchmark(df)
+    results = run_benchmark(df, with_odds=with_odds)
     print_report(results)
     return 0
 

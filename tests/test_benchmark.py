@@ -23,7 +23,10 @@ from scripts.run_benchmark import (
     brier_score_multiclass,
     compute_all_metrics,
     calibration_summary,
+    prepare_features,
+    run_benchmark,
 )
+from schema import FEATURE_COLUMNS, ALL_FEATURE_COLUMNS, ODDS_FEATURE_COLUMNS
 
 
 class TestBaselineProbabilities:
@@ -173,3 +176,130 @@ class TestMetrics:
         assert len(cal) == 5
         total_count = sum(row["count"] for row in cal)
         assert total_count == 5
+
+
+class TestOddsFeatureToggle:
+    """Tests for the --with-odds A/B benchmark toggle."""
+
+    def test_feature_columns_include_odds(self):
+        """ALL_FEATURE_COLUMNS must contain all ODDS_FEATURE_COLUMNS."""
+        for col in ODDS_FEATURE_COLUMNS:
+            assert col in ALL_FEATURE_COLUMNS, f"{col} missing from ALL_FEATURE_COLUMNS"
+
+    def test_feature_columns_exclude_odds(self):
+        """FEATURE_COLUMNS (default) must NOT contain odds columns."""
+        for col in ODDS_FEATURE_COLUMNS:
+            assert col not in FEATURE_COLUMNS, f"{col} should not be in FEATURE_COLUMNS"
+
+    def test_prepare_features_default_no_odds(self):
+        """prepare_features() without feature_columns arg uses FEATURE_COLUMNS (no odds)."""
+        import pandas as pd
+        df = pd.DataFrame({c: [0.0] for c in ALL_FEATURE_COLUMNS})
+        df["League"] = "E0"
+        result = prepare_features(df)
+        assert list(result.columns) == list(FEATURE_COLUMNS)
+
+    def test_prepare_features_with_odds(self):
+        """prepare_features() with ALL_FEATURE_COLUMNS includes odds columns."""
+        import pandas as pd
+        df = pd.DataFrame({c: [0.0] for c in ALL_FEATURE_COLUMNS})
+        df["League"] = "E0"
+        result = prepare_features(df, feature_columns=list(ALL_FEATURE_COLUMNS))
+        assert list(result.columns) == list(ALL_FEATURE_COLUMNS)
+        for col in ODDS_FEATURE_COLUMNS:
+            assert col in result.columns
+
+    def test_prepare_features_odds_probs_sum_to_one(self):
+        """Odds implied probabilities should sum to ~1 when valid."""
+        import pandas as pd
+        data = {c: [0.0] for c in ALL_FEATURE_COLUMNS}
+        data["has_odds"] = [1.0]
+        data["ImpliedHome"] = [0.45]
+        data["ImpliedDraw"] = [0.28]
+        data["ImpliedAway"] = [0.27]
+        data["League"] = ["E0"]
+        df = pd.DataFrame(data)
+        result = prepare_features(df, feature_columns=list(ALL_FEATURE_COLUMNS))
+        implied = result[["ImpliedHome", "ImpliedDraw", "ImpliedAway"]].values[0]
+        np.testing.assert_allclose(implied.sum(), 1.0, atol=1e-6)
+
+    def test_run_benchmark_without_odds_has_no_odds_model(self):
+        """run_benchmark(with_odds=False) should not produce main_model_with_odds."""
+        import pandas as pd
+        # Build a minimal synthetic dataset large enough for training
+        np.random.seed(42)
+        n = 200
+        data = {"Date": pd.date_range("2020-01-01", periods=n, freq="D")}
+        data["HomeTeam"] = ["TeamA"] * n
+        data["AwayTeam"] = ["TeamB"] * n
+        data["FTR"] = np.random.choice(["H", "D", "A"], size=n)
+        data["FTHG"] = np.random.randint(0, 4, size=n)
+        data["FTAG"] = np.random.randint(0, 4, size=n)
+        for c in ALL_FEATURE_COLUMNS:
+            data[c] = np.random.rand(n)
+        data["HomeElo"] = 1500.0
+        data["AwayElo"] = 1500.0
+        data["League"] = "E0"
+        df = pd.DataFrame(data)
+        results = run_benchmark(df, with_odds=False)
+        assert "main_model" in results["models"]
+        assert "main_model_with_odds" not in results["models"]
+
+    def test_run_benchmark_with_odds_has_odds_model(self):
+        """run_benchmark(with_odds=True) should produce main_model_with_odds."""
+        import pandas as pd
+        np.random.seed(42)
+        n = 200
+        data = {"Date": pd.date_range("2020-01-01", periods=n, freq="D")}
+        data["HomeTeam"] = ["TeamA"] * n
+        data["AwayTeam"] = ["TeamB"] * n
+        data["FTR"] = np.random.choice(["H", "D", "A"], size=n)
+        data["FTHG"] = np.random.randint(0, 4, size=n)
+        data["FTAG"] = np.random.randint(0, 4, size=n)
+        for c in ALL_FEATURE_COLUMNS:
+            data[c] = np.random.rand(n)
+        data["HomeElo"] = 1500.0
+        data["AwayElo"] = 1500.0
+        data["League"] = "E0"
+        data["has_odds"] = 1.0
+        data["ImpliedHome"] = 0.45
+        data["ImpliedDraw"] = 0.28
+        data["ImpliedAway"] = 0.27
+        df = pd.DataFrame(data)
+        results = run_benchmark(df, with_odds=True)
+        assert "main_model" in results["models"]
+        assert "main_model_with_odds" in results["models"]
+        # Both models should have valid metrics
+        for key in ["main_model", "main_model_with_odds"]:
+            m = results["models"][key]
+            assert "log_loss" in m
+            assert "brier" in m
+            assert "accuracy" in m
+            assert m["n_matches"] > 0
+        # A/B delta should be present
+        assert "ab_delta" in results
+        assert "log_loss_delta" in results["ab_delta"]
+
+    def test_odds_model_returns_valid_probabilities(self):
+        """Model with odds features should return probs that sum to 1."""
+        import pandas as pd
+        from backtest_report import train_model
+        np.random.seed(42)
+        n = 200
+        data = {"Date": pd.date_range("2020-01-01", periods=n, freq="D")}
+        data["FTR"] = np.random.choice(["H", "D", "A"], size=n)
+        for c in ALL_FEATURE_COLUMNS:
+            data[c] = np.random.rand(n)
+        data["League"] = "E0"
+        data["has_odds"] = 1.0
+        data["ImpliedHome"] = 0.45
+        data["ImpliedDraw"] = 0.28
+        data["ImpliedAway"] = 0.27
+        df = pd.DataFrame(data)
+        model = train_model(df, feature_columns=list(ALL_FEATURE_COLUMNS))
+        assert model is not None
+        X = prepare_features(df.iloc[:10], feature_columns=list(ALL_FEATURE_COLUMNS))
+        proba = model.predict_proba(X)
+        assert proba.shape == (10, 3)
+        np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
+        assert (proba >= 0).all()

@@ -26,7 +26,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from data_processing import normalize_csv_data
 from feature_engineering import create_features
 from model_handler import _make_base_xgb
-from schema import FEATURE_COLUMNS, CLASS_MAP, encode_league
+from schema import FEATURE_COLUMNS, ALL_FEATURE_COLUMNS, CLASS_MAP, encode_league
 from uncertainty import entropy_norm
 from trust import compute_trust_features, trust_score
 
@@ -50,23 +50,30 @@ def compute_brier_score_multiclass(y_true: np.ndarray, y_proba: np.ndarray, n_cl
     return float(np.mean(np.sum((y_proba - y_onehot) ** 2, axis=1)))
 
 
-def train_model(df_train: pd.DataFrame) -> Optional[CalibratedClassifierCV]:
+def train_model(df_train: pd.DataFrame, feature_columns: Optional[list] = None) -> Optional[CalibratedClassifierCV]:
     """
     Train a calibrated XGBoost model on the given training data.
     
+    Args:
+        df_train: Training DataFrame with feature columns and FTR target.
+        feature_columns: List of feature column names to use. Defaults to FEATURE_COLUMNS.
+    
     Returns a model with predict_proba method.
     """
+    if feature_columns is None:
+        feature_columns = FEATURE_COLUMNS
+
     df_local = df_train.copy()
     
     if "League" in df_local.columns:
         df_local["League"] = df_local["League"].apply(encode_league)
     
-    missing = [c for c in FEATURE_COLUMNS if c not in df_local.columns]
+    missing = [c for c in feature_columns if c not in df_local.columns]
     if missing:
         logger.error(f"Missing features: {missing}")
         return None
     
-    X = df_local[FEATURE_COLUMNS]
+    X = df_local[feature_columns]
     y = df_local["FTR"].map(CLASS_MAP)
     
     if len(X) < 50:
