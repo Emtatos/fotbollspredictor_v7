@@ -349,6 +349,104 @@ class TestInferenceConsistency:
                 # features_for_match must have been called
                 mock_builder.features_for_match.assert_called_once()
 
+    def test_old_inference_functions_removed_from_app(self):
+        """get_team_snapshot / get_team_features / build_current_team_states / compute_h2h
+        must NOT be callable from the app module's normal prediction path.
+        We verify by importing the module and checking these names are absent."""
+        import importlib
+        import streamlit as st
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = None
+        with patch.object(st, "secrets", mock_secrets, create=True):
+            import app as app_mod
+            importlib.reload(app_mod)
+
+            # These old inference helpers must not exist in app anymore
+            assert not hasattr(app_mod, "get_team_snapshot"), \
+                "get_team_snapshot still present in app — dead code from old inference path"
+            assert not hasattr(app_mod, "get_team_features"), \
+                "get_team_features still present in app — dead code from old inference path"
+            # Old imports must not be available
+            assert not hasattr(app_mod, "build_current_team_states"), \
+                "build_current_team_states still importable in app"
+            assert not hasattr(app_mod, "compute_h2h"), \
+                "compute_h2h still importable in app"
+
+    def test_predict_match_does_not_use_old_state_path(self):
+        """Running predict_match must NOT call build_current_team_states or compute_h2h."""
+        import importlib
+        import streamlit as st
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = None
+        with patch.object(st, "secrets", mock_secrets, create=True):
+            import app as app_mod
+            importlib.reload(app_mod)
+
+            mock_builder = MagicMock(spec=FeatureBuilder)
+            mock_builder.features_for_match.return_value = {
+                c: 0.0 for c in FEATURE_COLUMNS
+            }
+            mock_builder.get_team_state.return_value = {
+                "MatchesPlayed": 10, "FormPts": 2.0, "FormGD": 0.5,
+                "FormHome": 2.0, "FormAway": 1.5, "GoalsFor": 1.5,
+                "GoalsAgainst": 1.0, "Streak": 1, "Elo": 1500.0,
+                "Position": 5, "League": 0,
+            }
+
+            with patch.object(app_mod, "_get_feature_builder", return_value=mock_builder), \
+                 patch("state.build_current_team_states") as spy_states, \
+                 patch("features.compute_h2h") as spy_h2h:
+
+                mock_model = MagicMock()
+                mock_model.predict_proba.return_value = np.array([[0.5, 0.3, 0.2]])
+                mock_model.classes_ = np.array([0, 1, 2])
+
+                dummy_df = pd.DataFrame({"HomeTeam": ["A"], "AwayTeam": ["B"]})
+                app_mod.predict_match(mock_model, "Arsenal", "Chelsea", dummy_df)
+
+                spy_states.assert_not_called()
+                spy_h2h.assert_not_called()
+
+    def test_predict_match_returns_valid_output(self):
+        """predict_match returns (probs, stats) with correct shape after cleanup."""
+        import importlib
+        import streamlit as st
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = None
+        with patch.object(st, "secrets", mock_secrets, create=True):
+            import app as app_mod
+            importlib.reload(app_mod)
+
+            mock_builder = MagicMock(spec=FeatureBuilder)
+            mock_builder.features_for_match.return_value = {
+                c: 0.0 for c in FEATURE_COLUMNS
+            }
+            mock_builder.get_team_state.return_value = {
+                "MatchesPlayed": 10, "FormPts": 2.0, "FormGD": 0.5,
+                "FormHome": 2.0, "FormAway": 1.5, "GoalsFor": 1.5,
+                "GoalsAgainst": 1.0, "Streak": 1, "Elo": 1500.0,
+                "Position": 5, "League": 0,
+            }
+
+            with patch.object(app_mod, "_get_feature_builder", return_value=mock_builder):
+                mock_model = MagicMock()
+                mock_model.predict_proba.return_value = np.array([[0.5, 0.3, 0.2]])
+                mock_model.classes_ = np.array([0, 1, 2])
+
+                dummy_df = pd.DataFrame({"HomeTeam": ["A"], "AwayTeam": ["B"]})
+                result = app_mod.predict_match(mock_model, "Arsenal", "Chelsea", dummy_df)
+
+                assert result is not None
+                probs, stats = result
+                assert probs.shape == (3,)
+                assert abs(probs.sum() - 1.0) < 1e-6
+                assert "home_elo" in stats
+                assert "trust_score" in stats
+                assert "trust_label" in stats
+
     def test_features_for_match_keys_match_feature_columns(self):
         """FeatureBuilder.features_for_match() returns keys compatible with FEATURE_COLUMNS."""
         hist = _make_history_df(100)

@@ -82,7 +82,19 @@ def load_cached_model(model_path: Path) -> Optional[XGBClassifier]:
 
 @st.cache_resource(show_spinner="Bygger FeatureBuilder...")
 def _get_feature_builder(_df_features: pd.DataFrame) -> Optional[FeatureBuilder]:
-    """Skapar och cachar en FeatureBuilder-instans baserad på historisk data."""
+    """Skapar och cachar en FeatureBuilder-instans baserad på historisk data.
+
+    Cache-livscykel:
+    Parametern har underscore-prefix (_df_features) så att Streamlit inte
+    försöker hasha DataFrame:n.  Detta är säkert eftersom:
+      1. df_features laddas en gång vid appstart via load_feature_data() och
+         muteras aldrig under sessionens livstid.
+      2. Vid omträning (retrain / pipeline) anropas st.cache_resource.clear()
+         och st.cache_data.clear() följt av st.rerun(), vilket tvingar
+         en ny FeatureBuilder att skapas med uppdaterad data.
+    Resultatet är att exakt en FeatureBuilder-instans lever per Streamlit-
+    appkörning, och den speglar alltid den senast inlästa datan.
+    """
     if _df_features is None or _df_features.empty:
         return None
     builder = FeatureBuilder()
@@ -109,44 +121,6 @@ def get_all_teams(_df_features: pd.DataFrame) -> List[str]:
         return []
     unique_teams = pd.unique(_df_features[['HomeTeam', 'AwayTeam']].values.ravel('K'))
     return sorted([str(team) for team in unique_teams])
-
-
-def get_team_snapshot(team_name: str, df: pd.DataFrame) -> Optional[pd.Series]:
-    """Hämtar senaste matchdata för ett lag"""
-    team_matches = df[(df['HomeTeam'] == team_name) | (df['AwayTeam'] == team_name)]
-    if team_matches.empty:
-        return None
-    return team_matches.iloc[-1]
-
-
-def get_team_features(team_name: str, snapshot: pd.Series, df: pd.DataFrame) -> dict:
-    """Extraherar alla features för ett lag från snapshot (legacy).
-
-    OBS: Denna funktion används inte längre för prediktion (vi använder state replay),
-    men behålls för kompatibilitet med övrig UI-kod.
-    """
-    if snapshot['HomeTeam'] == team_name:
-        return {
-            'FormPts': snapshot.get('HomeFormPts', 0),
-            'FormGD': snapshot.get('HomeFormGD', 0),
-            'FormHome': snapshot.get('HomeFormHome', 0),
-            'GoalsFor': snapshot.get('HomeGoalsFor', 0),
-            'GoalsAgainst': snapshot.get('HomeGoalsAgainst', 0),
-            'Streak': snapshot.get('HomeStreak', 0),
-            'Position': snapshot.get('HomePosition', 0),
-            'Elo': snapshot.get('HomeElo', 1500),
-        }
-    else:
-        return {
-            'FormPts': snapshot.get('AwayFormPts', 0),
-            'FormGD': snapshot.get('AwayFormGD', 0),
-            'FormHome': snapshot.get('AwayFormAway', 0),
-            'GoalsFor': snapshot.get('AwayGoalsFor', 0),
-            'GoalsAgainst': snapshot.get('AwayGoalsAgainst', 0),
-            'Streak': snapshot.get('AwayStreak', 0),
-            'Position': snapshot.get('AwayPosition', 0),
-            'Elo': snapshot.get('AwayElo', 1500),
-        }
 
 
 def predict_match(
