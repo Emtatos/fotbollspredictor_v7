@@ -659,6 +659,7 @@ with tab_odds:
         rank_outcomes_by_streck_delta,
         rank_matches_by_streck_interest,
     )
+    from streck_import import auto_load_streck
 
     # -------------------------------------------------------------------
     # Forklaring av value-analys och streckjamforelse
@@ -888,14 +889,45 @@ with tab_odds:
                 # --------------------------------------------------
                 # Streckdata-inmatning for historiskt lage (CSV)
                 # --------------------------------------------------
+                # -----------------------------------------------
+                # Automatisk streckinlasning
+                # -----------------------------------------------
                 st.markdown("---")
+                streck_lookup: Dict[str, Dict[str, float]] = {}
+                streck_import_status = None
+
+                # Forsok automatisk inlasning fran data/streck_data.csv
+                try:
+                    auto_lookup, auto_status = auto_load_streck()
+                    streck_import_status = auto_status
+                    if auto_status.loaded and auto_lookup:
+                        streck_lookup.update(auto_lookup)
+                        st.success(
+                            f"Streckdata laddad automatiskt fran `{auto_status.source_label}` "
+                            f"({auto_status.valid_rows} rader, "
+                            f"{auto_status.matched_count} matcher)."
+                        )
+                        if auto_status.skipped_rows > 0:
+                            st.warning(
+                                f"{auto_status.skipped_rows} rad(er) hoppades over vid validering."
+                            )
+                    if auto_status.errors:
+                        with st.expander("Detaljer om streckinlasning"):
+                            for err in auto_status.errors:
+                                st.caption(f"- {err}")
+                except Exception as _auto_exc:
+                    logger.warning("Automatisk streckinlasning misslyckades: %s", _auto_exc)
+
+                # Manuell CSV-fallback
                 use_streck_csv = st.checkbox(
-                    "Ladda in streckprocent fran CSV",
+                    "Ladda in streckprocent fran CSV (manuell)",
                     value=False,
                     key="use_streck_csv",
-                    help="CSV med kolumner: HomeTeam, AwayTeam, Streck1, StreckX, Streck2",
+                    help=(
+                        "CSV med kolumner: HomeTeam, AwayTeam, Streck1, StreckX, Streck2. "
+                        "Overskriver automatiskt laddad streckdata."
+                    ),
                 )
-                streck_lookup: Dict[str, Dict[str, float]] = {}
                 if use_streck_csv:
                     uploaded_streck = st.file_uploader(
                         "Valj CSV-fil med streckprocent",
@@ -912,6 +944,8 @@ with tab_odds:
                                     f"Hittade: {', '.join(streck_df.columns.tolist())}"
                                 )
                             else:
+                                # Manuell CSV overskriver auto-laddad data
+                                streck_lookup.clear()
                                 for _, srow in streck_df.iterrows():
                                     key = f"{srow['HomeTeam']}_{srow['AwayTeam']}"
                                     streck_lookup[key] = {
@@ -919,9 +953,20 @@ with tab_odds:
                                         "X": float(srow["StreckX"]),
                                         "2": float(srow["Streck2"]),
                                     }
-                                st.success(f"Laddade streckdata for {len(streck_lookup)} matcher.")
+                                st.success(
+                                    f"Laddade streckdata fran uppladdad CSV for {len(streck_lookup)} matcher. "
+                                    "(Overskriver automatisk data.)"
+                                )
                         except Exception as e:
                             st.error(f"Kunde inte lasa CSV: {e}")
+
+                if not streck_lookup and streck_import_status is None:
+                    st.info(
+                        "Ingen streckdata hittades. "
+                        "Placera en CSV-fil som `data/streck_data.csv` med kolumner "
+                        "HomeTeam, AwayTeam, Streck1, StreckX, Streck2 "
+                        "for automatisk inlasning, eller ladda upp manuellt ovan."
+                    )
                 st.markdown("---")
 
                 recent = df_features.tail(n_rows).iloc[::-1]
