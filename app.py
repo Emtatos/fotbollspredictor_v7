@@ -1,10 +1,8 @@
 """
-Fotbollspredictor v7 - Konsoliderad Streamlit-applikation
+Odds & Value-verktyg — Streamlit-applikation
 
-Denna app kombinerar det bästa från app.py och streamlit_app_v7.py:
-- Modulär arkitektur med pipeline från main.py
-- Avancerade funktioner som halvgarderingar och OpenAI-analys
-- Förbättrad användarvänlighet och kodkvalitet
+Huvudflöde: odds → fair probabilities → value (edge) → streckjämförelse → ranking.
+Innehåller även modellbaserad prediktion (XGBoost) som komplement.
 """
 
 import streamlit as st
@@ -57,8 +55,8 @@ except ImportError:
 # ============================================================================
 
 st.set_page_config(
-    page_title="Fotbollspredictor v7",
-    page_icon="⚽",
+    page_title="Odds & Value-verktyg",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -265,15 +263,15 @@ if df_features is not None and not df_features.empty:
 # ANVÄNDARGRÄNSSNITT
 # ============================================================================
 
-st.title("⚽ Fotbollspredictor v7")
-st.markdown("Prediktera matcher från Premier League (E0), Championship (E1), League One (E2) och League Two (E3)")
+st.title("📈 Odds & Value-verktyg")
+st.markdown("Analysera odds, fair probabilities, value och streckjämförelse för engelska ligor")
 
 # ============================================================================
 # SIDEBAR
 # ============================================================================
 
 with st.sidebar:
-    st.header("📊 Systemstatus")
+    st.header("📊 Status")
     
     if model:
         st.success(f"✅ Modell laddad: `{MODEL_FILENAME}`")
@@ -405,14 +403,15 @@ if not model or df_features is None or not all_teams:
         st.stop()
 
 # Skapa flikar för olika funktioner
-tab1, tab2, tab_odds, tab3 = st.tabs(["🎯 Enskild Match", "📋 Flera Matcher", "📈 Oddsverktyg", "ℹ️ Om Appen"])
+tab_odds, tab1, tab2, tab3 = st.tabs(["📈 Odds & Value", "🎯 Enskild Match", "📋 Flera Matcher", "ℹ️ Om Appen"])
 
 # ============================================================================
 # FLIK 1: ENSKILD MATCH
 # ============================================================================
 
 with tab1:
-    st.header("Prediktera en enskild match")
+    st.header("Enskild match — modellprediktion")
+    st.caption("Använder den tränade XGBoost-modellen för att prediktera utfall. Se Odds & Value-fliken för oddsanalys.")
     
     col1, col2 = st.columns(2)
     
@@ -534,7 +533,8 @@ with tab1:
 # ============================================================================
 
 with tab2:
-    st.header("Prediktera flera matcher samtidigt")
+    st.header("Flera matcher — modellprediktion")
+    st.caption("Använder den tränade modellen. Se Odds & Value-fliken för oddsanalys.")
     st.markdown("Skriv in matcher, en per rad. Format: `Hemmalag - Bortalag`")
     
     match_input = st.text_area(
@@ -636,10 +636,9 @@ with tab2:
 # ============================================================================
 
 with tab_odds:
-    st.header("Oddsverktyg — 1X2 Sannolikheter, Value & Ranking")
+    st.header("Odds, Value & Streckjämförelse")
     st.markdown(
-        "Beraknar implicita sannolikheter, overround-justerade fair-sannolikheter, "
-        "value-analys (edge & expected return) och rankar utfall efter edge."
+        "Mata in odds → se fair probabilities → jämför value och streck → hitta intressanta utfall."
     )
 
     from odds_tool import (
@@ -661,46 +660,26 @@ with tab_odds:
     )
     from streck_import import auto_load_streck
 
-    # -------------------------------------------------------------------
-    # Forklaring av value-analys och streckjamforelse
-    # -------------------------------------------------------------------
-    with st.expander("Vad betyder value-analysen?", expanded=False):
+    with st.expander("Ordlista: edge, value, streck", expanded=False):
         st.markdown(
-            "**Positiv edge** innebar att jamforelsesannolikheten ar hogre an "
-            "marknadens fair probability for ett utfall. Det kan tyda pa att "
-            "oddsen ar generosa relativt marknaden.\n\n"
-            "**Negativ edge** innebar det motsatta — marknaden ger hogre "
-            "sannolikhet an jamforelsesannolikheten.\n\n"
-            "**Expected return** visar forvantad avkastning baserat pa "
-            "jamforelsesannolikheten och oddsen. Positivt varde antyder "
-            "att oddsen ar generosa.\n\n"
-            "*Detta ar ett beslutsstod, inte en garanti for vinst. "
-            "Value-analysen i denna version bygger pa marknadskonsensus "
-            "mellan bookmakers som jamforelsekalla.*"
-        )
-
-    with st.expander("Vad betyder streckjamforelsen?", expanded=False):
-        st.markdown(
-            "**Understreckad** innebar att streckandelen ar lagre an "
-            "marknadens fair probability — farre spelar an marknaden "
-            "antyder pa det utfallet.\n\n"
-            "**Overstreckad** innebar att streckandelen ar hogre an "
-            "marknadens fair probability — fler spelar an marknaden "
-            "antyder.\n\n"
-            "Delta = streckprocent minus fair market probability. "
-            "Negativt delta = understreckad, positivt delta = overstreckad.\n\n"
-            "*Detta ar beslutsstod, inte garanti.*"
+            "**Positiv edge** — jämförelsesannolikheten är högre än "
+            "marknadens fair probability. Oddsen kan vara generösa.\n\n"
+            "**Negativ edge** — marknaden ger högre sannolikhet än jämförelsen.\n\n"
+            "**Expected return** — förväntad avkastning givet jämförelsesannolikheten och oddsen.\n\n"
+            "**Understreckad** — streckandelen är lägre än fair probability (färre spelar än marknaden antyder).\n\n"
+            "**Överstreckad** — streckandelen är högre än fair probability (fler spelar än marknaden antyder).\n\n"
+            "*Beslutsstöd, inte garanti.*"
         )
 
     odds_mode = st.radio(
-        "Valj inmatningsmetod:",
-        ["Manuell (skriv in odds)", "Fran data (historiska matcher)"],
+        "Inmatning:",
+        ["Manuell (skriv in odds)", "Från data (historiska matcher)"],
         key="odds_mode",
         horizontal=True,
     )
 
     if odds_mode == "Manuell (skriv in odds)":
-        st.subheader("Ange 1X2-odds")
+        st.subheader("1. Ange 1X2-odds")
         ocol1, ocol2, ocol3 = st.columns(3)
         with ocol1:
             manual_home = st.number_input("Hemma (1)", min_value=1.01, value=2.10, step=0.05, key="m_home")
@@ -782,7 +761,7 @@ with tab_odds:
             if report is None:
                 st.error("Ogiltiga odds — alla varden maste vara > 1.0")
             else:
-                st.subheader("Resultat")
+                st.subheader("2. Odds & Fair Probabilities")
 
                 col_a, col_b = st.columns(2)
                 with col_a:
@@ -810,7 +789,7 @@ with tab_odds:
                 # Value-analys for manuellt lage
                 value_rpt = build_value_report(report, comparison_probs=manual_comp_probs)
                 if value_rpt is not None and manual_comp_probs is not None:
-                    st.subheader("Value-analys")
+                    st.subheader("3. Value-analys")
                     st.caption(f"Jamforelsekalla: {value_rpt.comparison_source}")
                     value_rows = []
                     for ov in value_rpt.outcomes:
@@ -837,7 +816,7 @@ with tab_odds:
                         report, manual_streck,
                     )
                     if streck_rpt is not None:
-                        st.subheader("Streckjamforelse")
+                        st.subheader("4. Streckjämförelse")
                         streck_rows = []
                         for os_item in streck_rpt.outcomes:
                             olabel = {"1": "Hemma (1)", "X": "Oavgjort (X)", "2": "Borta (2)"}[os_item.outcome]
@@ -864,7 +843,7 @@ with tab_odds:
                 )
 
     else:
-        st.subheader("Analysera odds fran historisk data")
+        st.subheader("Odds & Value från historisk data")
         if df_features is None or df_features.empty:
             st.warning("Ingen feature-data laddad. Kor pipeline forst.")
         else:
@@ -992,7 +971,7 @@ with tab_odds:
                         # -----------------------------------------------
                         # Ranking-tabell: mest intressanta utfall
                         # -----------------------------------------------
-                        st.subheader("Ranking — mest intressanta utfall")
+                        st.subheader("Snabböversikt — mest intressanta utfall")
                         ranked_outcomes = rank_outcomes_by_edge(vr_list)
 
                         # Visa topp-10 positiva och topp-5 negativa
@@ -1036,7 +1015,7 @@ with tab_odds:
                     # -----------------------------------------------
                     # Detaljvy per match (rankad efter intresse)
                     # -----------------------------------------------
-                    st.subheader("Detaljerad analys per match")
+                    st.subheader("Detaljvy per match")
 
                     # Visa matcher i intresseordning om ranking finns
                     if value_reports:
@@ -1135,7 +1114,7 @@ with tab_odds:
 
                         if streck_reports_list:
                             st.divider()
-                            st.subheader("Streckjamforelse — ranking")
+                            st.subheader("Streckjämförelse — över- & understreckade")
 
                             ranked_streck_outcomes = rank_outcomes_by_streck_delta(streck_reports_list)
 
@@ -1197,114 +1176,63 @@ with tab_odds:
 # ============================================================================
 
 with tab3:
-    st.header("Om Fotbollspredictor v8")
-    
+    st.header("Om appen")
+
     st.markdown("""
-    Fotbollspredictor v8 bygger vidare med en professionell ML-pipeline:
-    unified FeatureBuilder, walk-forward validering, kalibrering, och stod for odds som valbar feature-grupp.
+    **Odds & Value-verktyget** hjälper dig analysera 1X2-odds, beräkna fair
+    probabilities, hitta value (edge) och jämföra mot folkets streckprocent.
+
+    Appen innehåller också en **modellbaserad prediktion** (XGBoost) som
+    komplement — se flikarna *Enskild Match* och *Flera Matcher*.
     """)
-    
+
     st.divider()
-    
-    st.subheader("🧠 Hur fungerar modellen?")
-    
-    st.markdown("""
-    Modellen anvander **XGBoost** med **CalibratedClassifierCV** (sigmoid/isotonic).
-    Traning sker med tidssorterad split (train/calibrate/test) och walk-forward cross-validation (3 folds).
-    Hyperparametrar optimeras via RandomizedSearchCV pa train-only data.
-    """)
-    
-    if model_metadata:
-        feats = model_metadata.get("features", [])
-        n_feats = len(feats)
-    else:
-        n_feats = len(FEATURE_COLUMNS)
-    
-    st.markdown(f"#### Feature-grupper ({n_feats} features)")
-    
-    feature_data = {
-        "Grupp": ["Base (form, ELO, H2H, position)", "Matchstats (shots, SOT, corners, cards)", "Odds (implied probs)", "Skador"],
-        "Antal": [22, 24, 4, 6],
-        "Beskrivning": [
-            "FormPts, FormGD, Streak, Elo, Position, H2H, League",
-            "Rolling shots/SOT (5,10), conversion, corner share, cards rate + has_matchstats",
-            "has_odds, ImpliedHome, ImpliedDraw, ImpliedAway (valbar via USE_ODDS_FEATURES)",
-            "InjuredPlayers, KeyPlayersOut, InjurySeverity (Home/Away)",
-        ],
-    }
-    st.dataframe(feature_data, use_container_width=True, hide_index=True)
-    
-    st.info("""
-    **Nytt i v8:**
-    - **Unified FeatureBuilder** — samma logik for traning och inference, eliminerar mismatch
-    - **Walk-forward validering** — 3 folds over tid, rapporterar mean + std
-    - **Kalibrering** — sigmoid/isotonic pa separat calibration split
-    - **Odds som valbar feature** — trana med/utan odds, jamfor i backtest-rapporten
-    - **Matchstats** — rolling shots, SOT, conversion, corner share, cards rate
-    - **Backtest-rapport** — logloss, brier, accuracy, F1, per liga/sasong, reliability bins
-    """)
-    
-    st.divider()
-    
-    st.subheader("🎯 Funktioner i appen")
-    
+
+    st.subheader("Huvudfunktioner")
+
     col1, col2 = st.columns(2)
-    
+
     with col1:
         st.markdown("""
-        - **Enskild match-prediktion** med feature contributions (top 5 gain)
-        - **Flera matcher** — tippa en hel omgang samtidigt
-        - **Halvgarderingar** — forslag pa ossakra matcher
+        **Odds & Value (huvudflöde)**
+        - Fair probabilities från bookmaker-odds
+        - Value-analys: edge & expected return
+        - Streckjämförelse: under-/överstreckade utfall
+        - Ranking av mest intressanta utfall & matcher
         """)
-    
+
     with col2:
         st.markdown("""
-        - **Model Card** i sidomenyn: version, traning, features, ablation
-        - **Trust score** — datatackning per prediktion
-        - **AI-analys (valfritt)** via OpenAI
+        **Modellprediktion (komplement)**
+        - Enskild match eller hel omgång
+        - Halvgarderingsförslag
+        - Trust score & AI-analys (valfritt)
         """)
-    
+
     st.divider()
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("📊 Teknisk Stack")
+
+    with st.expander("Teknisk information"):
         st.markdown("""
         - **Frontend:** Streamlit
-        - **ML:** XGBoost + scikit-learn (CalibratedClassifierCV)
-        - **Data:** pandas, numpy, pyarrow
-        - **Testning:** pytest (118+ tester, CI pa Python 3.9/3.10/3.11)
-        - **Deployment:** Render, Docker
+        - **Modell:** XGBoost + CalibratedClassifierCV
+        - **Data:** football-data.co.uk (engelska ligor)
+        - **Testning:** pytest, CI på Python 3.9/3.10/3.11
+        - **Deployment:** Render / Docker
         """)
-    
-    with col2:
-        st.subheader("🔧 Pipeline")
-        st.markdown("""
-        1. **Data ingestion** — download + normalize + Season extraction
-        2. **Feature engineering** — unified FeatureBuilder (replay engine)
-        3. **Training** — hyperparam search + walk-forward + calibration
-        4. **Report** — backtest_report.md med alla metriker
-        5. **Metadata** — metadata.json med full reproducerbarhet
-        """)
-    
+
+        if model_metadata:
+            feats = model_metadata.get("features", [])
+            n_feats = len(feats)
+        else:
+            n_feats = len(FEATURE_COLUMNS)
+        st.caption(f"Modellen använder {n_feats} features.")
+
     st.divider()
-    
-    st.subheader("📝 Version")
+
     if model_metadata:
         ver = model_metadata.get("model_version", "v8.0")
-        st.success(f"**{ver}**")
+        st.caption(f"Version: **{ver}**")
     else:
-        st.success("**v8.0**")
-    
-    st.subheader("🐛 Felsökning")
-    
-    st.markdown("""
-    1. **Kör omträning** via sidomenyn.
-    2. **Kontrollera API-nyckel** for skadedata (`API_FOOTBALL_KEY`).
-    3. **Se loggar** i Render Dashboard.
-    """)
-    
-    st.divider()
-    
+        st.caption("Version: **v8.0**")
+
     st.caption("Utvecklad av **Emtatos**.")
