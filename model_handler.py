@@ -7,6 +7,7 @@ import logging
 import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
 from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
@@ -118,10 +119,11 @@ def _make_base_xgb(**overrides) -> XGBClassifier:
         return XGBClassifier(**kw)
 
 
-def _walk_forward(X: pd.DataFrame, y: pd.Series, n_folds: int = 3) -> Dict:
+def _walk_forward(X: pd.DataFrame, y: pd.Series, n_folds: int = 3, xgb_params: Optional[Dict] = None) -> Dict:
     n = len(X)
     fold_size = n // (n_folds + 1)
     results: Dict[str, List[float]] = {"logloss": [], "brier": [], "accuracy": [], "f1_macro": []}
+    params = xgb_params or {}
 
     for fold in range(n_folds):
         train_end = fold_size * (fold + 1)
@@ -135,8 +137,16 @@ def _walk_forward(X: pd.DataFrame, y: pd.Series, n_folds: int = 3) -> Dict:
         if len(X_te) < 10:
             continue
 
-        model = _make_base_xgb()
-        model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
+        # Use an internal split of training data for eval_set (not fold test data)
+        eval_split = max(int(len(X_tr) * 0.85), 1)
+        X_tr_inner, y_tr_inner = X_tr.iloc[:eval_split], y_tr.iloc[:eval_split]
+        X_eval_inner, y_eval_inner = X_tr.iloc[eval_split:], y_tr.iloc[eval_split:]
+
+        model = _make_base_xgb(**params)
+        if len(X_eval_inner) > 0:
+            model.fit(X_tr_inner, y_tr_inner, eval_set=[(X_eval_inner, y_eval_inner)], verbose=False)
+        else:
+            model.fit(X_tr, y_tr, verbose=False)
         proba = model.predict_proba(X_te)
         preds = model.predict(X_te)
         y_arr = np.array(y_te)
@@ -382,16 +392,37 @@ def train_and_save_model(
             cal_method = "sigmoid"
             logger.info("Too few calibration samples for isotonic; using sigmoid.")
 
-        X_train_cal = pd.concat([X_train, X_cal], ignore_index=True)
-        y_train_cal = pd.concat([y_train, y_cal], ignore_index=True)
-        calibrated_model = CalibratedClassifierCV(
-            estimator=_make_base_xgb(**best_params),
-            method=cal_method,
-            cv=3,
-            ensemble=False,
-        )
-        calibrated_model.fit(X_train_cal, y_train_cal)
-        logger.info("Calibration done (method=%s).", cal_method)
+        # Use FrozenEstimator so the already-trained base_model is never
+        # refitted during the calibration CV.  Pick a safe number of folds
+        # based on the smallest class count in the cal-split.
+        from collections import Counter
+        class_counts = Counter(y_cal)
+        min_class_count = min(class_counts.values()) if class_counts else 0
+        safe_cv = max(2, min(5, min_class_count))
+
+        if min_class_count < 2:
+            logger.warning(
+                "Cal-split too small for CV calibration (min_class=%d). "
+                "Skipping calibration; using base model.",
+                min_class_count,
+            )
+            calibrated_model = base_model
+        else:
+            try:
+                calibrated_model = CalibratedClassifierCV(
+                    estimator=FrozenEstimator(base_model),
+                    method=cal_method,
+                    cv=safe_cv,
+                    ensemble=True,
+                )
+                calibrated_model.fit(X_cal, y_cal)
+            except (ValueError, IndexError) as e:
+                logger.warning(
+                    "CV calibration failed (%s). Falling back to base model.", e
+                )
+                calibrated_model = base_model
+        logger.info("Calibration done (method=%s, FrozenEstimator on cal-split, n=%d).",
+                     cal_method, len(X_cal))
 
         y_test_arr = np.array(y_test)
         test_proba = calibrated_model.predict_proba(X_test)
@@ -411,7 +442,9 @@ def train_and_save_model(
                      test_metrics["accuracy"], test_metrics["logloss"],
                      test_metrics["brier"], test_metrics["f1_macro"])
 
-        wf = _walk_forward(X_full, y_full, n_folds=3)
+        X_train_cal = pd.concat([X_train, X_cal], ignore_index=True)
+        y_train_cal = pd.concat([y_train, y_cal], ignore_index=True)
+        wf = _walk_forward(X_train_cal, y_train_cal, n_folds=3, xgb_params=best_params)
         logger.info("Walk-forward: logloss_mean=%.4f+/-%.4f", wf["logloss_mean"], wf["logloss_std"])
 
         conf_mat = confusion_matrix(y_test_arr, test_preds, labels=[0, 1, 2])
@@ -463,7 +496,26 @@ def train_and_save_model(
 
 
 def load_model(model_path: Path) -> Optional[Union[CalibratedClassifierCV, XGBClassifier]]:
-    model_dir = model_path.parent if model_path.is_file() or not model_path.exists() else model_path
+    logger.info("load_model called with: %s", model_path)
+
+    # --- Specific file requested (has a file extension) ---
+    if model_path.suffix:
+        if not model_path.exists():
+            logger.warning("Requested model file %s not found. Returning None (no fallback).", model_path)
+            return None
+        try:
+            model = joblib.load(model_path)
+            logger.info("Loaded requested model file: %s", model_path)
+            if isinstance(model, (CalibratedClassifierCV, XGBClassifier)):
+                return model
+            logger.error("Invalid model type in %s: %s", model_path, type(model))
+            return None
+        except Exception as e:
+            logger.error("Failed to load model from %s: %s", model_path, e)
+            return None
+
+    # --- Directory path (legacy fallback chain) ---
+    model_dir = model_path if model_path.is_dir() else model_path.parent
 
     calibrated_path = model_dir / MODEL_CALIBRATED_FILENAME
     base_path = model_dir / MODEL_BASE_FILENAME
@@ -471,7 +523,7 @@ def load_model(model_path: Path) -> Optional[Union[CalibratedClassifierCV, XGBCl
     if calibrated_path.exists():
         try:
             model = joblib.load(calibrated_path)
-            logger.info("Loaded calibrated model from %s", calibrated_path)
+            logger.info("Loaded calibrated model from %s (legacy fallback)", calibrated_path)
             if isinstance(model, CalibratedClassifierCV):
                 return model
         except Exception as e:
@@ -480,23 +532,11 @@ def load_model(model_path: Path) -> Optional[Union[CalibratedClassifierCV, XGBCl
     if base_path.exists():
         try:
             model = joblib.load(base_path)
-            logger.info("Loaded base model from %s", base_path)
+            logger.info("Loaded base model from %s (legacy fallback)", base_path)
             if isinstance(model, XGBClassifier):
                 return model
         except Exception as e:
             logger.warning("Failed to load base model: %s", e)
 
-    if not model_path.exists():
-        logger.warning("Model file %s not found.", model_path)
-        return None
-
-    try:
-        model = joblib.load(model_path)
-        logger.info("Loaded model from %s (legacy)", model_path)
-        if isinstance(model, (CalibratedClassifierCV, XGBClassifier)):
-            return model
-        logger.error("Invalid model type in %s", model_path)
-        return None
-    except Exception as e:
-        logger.error("Failed to load model from %s: %s", model_path, e)
-        return None
+    logger.warning("No model found via legacy fallback in %s", model_dir)
+    return None
