@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
-from typing import Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple
 
 # Importera nödvändiga funktioner från moduler
 from main import run_pipeline, get_current_season_code
@@ -653,9 +653,15 @@ with tab_odds:
         rank_outcomes_by_edge,
         rank_matches_by_interest,
     )
+    from streck_analysis import (
+        build_streck_report,
+        build_streck_report_from_odds_report,
+        rank_outcomes_by_streck_delta,
+        rank_matches_by_streck_interest,
+    )
 
     # -------------------------------------------------------------------
-    # Forklaring av value-analys
+    # Forklaring av value-analys och streckjamforelse
     # -------------------------------------------------------------------
     with st.expander("Vad betyder value-analysen?", expanded=False):
         st.markdown(
@@ -670,6 +676,19 @@ with tab_odds:
             "*Detta ar ett beslutsstod, inte en garanti for vinst. "
             "Value-analysen i denna version bygger pa marknadskonsensus "
             "mellan bookmakers som jamforelsekalla.*"
+        )
+
+    with st.expander("Vad betyder streckjamforelsen?", expanded=False):
+        st.markdown(
+            "**Understreckad** innebar att streckandelen ar lagre an "
+            "marknadens fair probability — farre spelar an marknaden "
+            "antyder pa det utfallet.\n\n"
+            "**Overstreckad** innebar att streckandelen ar hogre an "
+            "marknadens fair probability — fler spelar an marknaden "
+            "antyder.\n\n"
+            "Delta = streckprocent minus fair market probability. "
+            "Negativt delta = understreckad, positivt delta = overstreckad.\n\n"
+            "*Detta ar beslutsstod, inte garanti.*"
         )
 
     odds_mode = st.radio(
@@ -716,6 +735,44 @@ with tab_odds:
                     "1": comp_home / total_comp,
                     "X": comp_draw / total_comp,
                     "2": comp_away / total_comp,
+                }
+
+        # -----------------------------------------------------------
+        # Streckprocent-inmatning (manuellt lage)
+        # -----------------------------------------------------------
+        use_streck = st.checkbox(
+            "Ange streckprocent for jamforelse",
+            value=False,
+            key="use_streck_manual",
+        )
+        manual_streck = None
+        if use_streck:
+            st.caption(
+                "Ange folkets streckprocent for varje utfall (1 / X / 2). "
+                "Ange i procent (t.ex. 45 for 45%). Normaliseras automatiskt."
+            )
+            scol1, scol2, scol3 = st.columns(3)
+            with scol1:
+                streck_home = st.number_input(
+                    "Streck 1 (%)", min_value=0.0, max_value=100.0,
+                    value=40.0, step=1.0, key="s_home",
+                )
+            with scol2:
+                streck_draw = st.number_input(
+                    "Streck X (%)", min_value=0.0, max_value=100.0,
+                    value=30.0, step=1.0, key="s_draw",
+                )
+            with scol3:
+                streck_away = st.number_input(
+                    "Streck 2 (%)", min_value=0.0, max_value=100.0,
+                    value=30.0, step=1.0, key="s_away",
+                )
+            total_streck = streck_home + streck_draw + streck_away
+            if total_streck > 0:
+                manual_streck = {
+                    "1": streck_home,
+                    "X": streck_draw,
+                    "2": streck_away,
                 }
 
         if st.button("Berakna", key="odds_calc", type="primary", use_container_width=True):
@@ -773,6 +830,34 @@ with tab_odds:
                         "Med en enda bookmaker finns ingen marknadskonsensus att jamfora mot."
                     )
 
+                # Streckjamforelse for manuellt lage
+                if manual_streck is not None:
+                    streck_rpt = build_streck_report_from_odds_report(
+                        report, manual_streck,
+                    )
+                    if streck_rpt is not None:
+                        st.subheader("Streckjamforelse")
+                        streck_rows = []
+                        for os_item in streck_rpt.outcomes:
+                            olabel = {"1": "Hemma (1)", "X": "Oavgjort (X)", "2": "Borta (2)"}[os_item.outcome]
+                            # Color-code the label
+                            if os_item.label == "understreckad":
+                                badge = "🟢 understreckad"
+                            elif os_item.label == "overstreckad":
+                                badge = "🔴 overstreckad"
+                            else:
+                                badge = "⚪ neutral"
+                            streck_rows.append({
+                                "Utfall": olabel,
+                                "Fair market prob": f"{os_item.fair_prob:.1%}",
+                                "Streckprocent": f"{os_item.streck_pct:.1%}",
+                                "Delta": f"{os_item.delta:+.1%}",
+                                "Bedomning": badge,
+                            })
+                        st.dataframe(pd.DataFrame(streck_rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.warning("Kunde inte berakna streckjamforelse — kontrollera streckvardena.")
+
                 st.caption(
                     "Fair-sannolikheter ar overround-justerade (normaliserade till 100%)."
                 )
@@ -799,6 +884,45 @@ with tab_odds:
             else:
                 n_rows = min(len(df_features), 50)
                 st.info(f"Visar de senaste {n_rows} matcherna med tillgangliga odds.")
+
+                # --------------------------------------------------
+                # Streckdata-inmatning for historiskt lage (CSV)
+                # --------------------------------------------------
+                st.markdown("---")
+                use_streck_csv = st.checkbox(
+                    "Ladda in streckprocent fran CSV",
+                    value=False,
+                    key="use_streck_csv",
+                    help="CSV med kolumner: HomeTeam, AwayTeam, Streck1, StreckX, Streck2",
+                )
+                streck_lookup: Dict[str, Dict[str, float]] = {}
+                if use_streck_csv:
+                    uploaded_streck = st.file_uploader(
+                        "Valj CSV-fil med streckprocent",
+                        type=["csv"],
+                        key="streck_csv_upload",
+                    )
+                    if uploaded_streck is not None:
+                        try:
+                            streck_df = pd.read_csv(uploaded_streck)
+                            required_cols = {"HomeTeam", "AwayTeam", "Streck1", "StreckX", "Streck2"}
+                            if not required_cols.issubset(set(streck_df.columns)):
+                                st.error(
+                                    f"CSV maste innehalla kolumnerna: {', '.join(sorted(required_cols))}. "
+                                    f"Hittade: {', '.join(streck_df.columns.tolist())}"
+                                )
+                            else:
+                                for _, srow in streck_df.iterrows():
+                                    key = f"{srow['HomeTeam']}_{srow['AwayTeam']}"
+                                    streck_lookup[key] = {
+                                        "1": float(srow["Streck1"]),
+                                        "X": float(srow["StreckX"]),
+                                        "2": float(srow["Streck2"]),
+                                    }
+                                st.success(f"Laddade streckdata for {len(streck_lookup)} matcher.")
+                        except Exception as e:
+                            st.error(f"Kunde inte lasa CSV: {e}")
+                st.markdown("---")
 
                 recent = df_features.tail(n_rows).iloc[::-1]
                 reports = build_reports_from_dataframe(recent)
@@ -950,10 +1074,77 @@ with tab_odds:
                                     "value-analys kraver fler bookmakers for marknadskonsensus."
                                 )
 
+                    # --------------------------------------------------
+                    # Streckjamforelse: ranking for historiskt lage
+                    # --------------------------------------------------
+                    if streck_lookup:
+                        streck_reports_list = []
+                        for rpt in reports:
+                            skey = f"{rpt.home_team}_{rpt.away_team}"
+                            if skey in streck_lookup:
+                                sr = build_streck_report_from_odds_report(
+                                    rpt, streck_lookup[skey],
+                                )
+                                if sr is not None:
+                                    streck_reports_list.append(sr)
+
+                        if streck_reports_list:
+                            st.divider()
+                            st.subheader("Streckjamforelse — ranking")
+
+                            ranked_streck_outcomes = rank_outcomes_by_streck_delta(streck_reports_list)
+
+                            # Mest understreckade
+                            understreck = [r for r in ranked_streck_outcomes if r[2].delta < -0.001]
+                            if understreck:
+                                st.markdown("**Mest understreckade utfall:**")
+                                us_rows = []
+                                for match_label, outcome_label, os_item in understreck[:10]:
+                                    us_rows.append({
+                                        "Match": match_label,
+                                        "Utfall": outcome_label,
+                                        "Fair prob": f"{os_item.fair_prob:.1%}",
+                                        "Streck": f"{os_item.streck_pct:.1%}",
+                                        "Delta": f"{os_item.delta:+.1%}",
+                                        "Bedomning": "🟢 understreckad",
+                                    })
+                                st.dataframe(pd.DataFrame(us_rows), use_container_width=True, hide_index=True)
+
+                            # Mest overstreckade
+                            overstreck = [r for r in reversed(ranked_streck_outcomes) if r[2].delta > 0.001]
+                            if overstreck:
+                                st.markdown("**Mest overstreckade utfall:**")
+                                os_rows = []
+                                for match_label, outcome_label, os_item in overstreck[:10]:
+                                    os_rows.append({
+                                        "Match": match_label,
+                                        "Utfall": outcome_label,
+                                        "Fair prob": f"{os_item.fair_prob:.1%}",
+                                        "Streck": f"{os_item.streck_pct:.1%}",
+                                        "Delta": f"{os_item.delta:+.1%}",
+                                        "Bedomning": "🔴 overstreckad",
+                                    })
+                                st.dataframe(pd.DataFrame(os_rows), use_container_width=True, hide_index=True)
+
+                            # Mest intressanta matcher
+                            ranked_streck_matches = rank_matches_by_streck_interest(streck_reports_list)
+                            if ranked_streck_matches:
+                                st.markdown("**Mest intressanta matcher (storst streckavvikelse):**")
+                                mi_rows = []
+                                for sr in ranked_streck_matches[:10]:
+                                    mi_rows.append({
+                                        "Match": f"{sr.home_team} vs {sr.away_team}",
+                                        "Storsta avvikelse": f"{sr.max_abs_delta:+.1%}",
+                                    })
+                                st.dataframe(pd.DataFrame(mi_rows), use_container_width=True, hide_index=True)
+
+                            if not understreck and not overstreck:
+                                st.info("Ingen tydlig streckavvikelse hittades.")
+
                     st.caption(
-                        "Value-analysen i denna version bygger pa marknadskonsensus "
-                        "mellan bookmakers. Framtida tillagg: modellsannolikheter, "
-                        "streckjamforelse."
+                        "Value-analysen bygger pa marknadskonsensus mellan bookmakers. "
+                        "Streckjamforelsen visar skillnaden mellan folkets streck och "
+                        "marknadens fair probability."
                     )
 
 # ============================================================================
