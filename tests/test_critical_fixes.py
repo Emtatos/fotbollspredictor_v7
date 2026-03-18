@@ -310,35 +310,44 @@ class TestWalkForwardFix:
 class TestInferenceConsistency:
     """predict_match must use FeatureBuilder.features_for_match()."""
 
-    @patch("app._get_feature_builder")
-    def test_predict_match_uses_features_for_match(self, mock_get_builder):
+    def test_predict_match_uses_features_for_match(self):
         """predict_match() calls FeatureBuilder.features_for_match()."""
-        from app import predict_match
+        import importlib
+        import streamlit as st
 
-        # Set up mock builder
-        mock_builder = MagicMock(spec=FeatureBuilder)
-        mock_builder.features_for_match.return_value = {
-            c: 0.0 for c in FEATURE_COLUMNS
-        }
-        mock_builder.get_team_state.return_value = {
-            "MatchesPlayed": 10, "FormPts": 2.0, "FormGD": 0.5,
-            "FormHome": 2.0, "FormAway": 1.5, "GoalsFor": 1.5,
-            "GoalsAgainst": 1.0, "Streak": 1, "Elo": 1500.0,
-            "Position": 5, "League": 0,
-        }
-        mock_get_builder.return_value = mock_builder
+        # Patch st.secrets before importing app (module-level code reads secrets)
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = None
+        with patch.object(st, "secrets", mock_secrets, create=True):
+            # Force re-import so module-level code sees the mock
+            import app as app_mod
+            importlib.reload(app_mod)
+            predict_match_fn = app_mod.predict_match
 
-        # Mock model
-        mock_model = MagicMock()
-        mock_model.predict_proba.return_value = np.array([[0.5, 0.3, 0.2]])
-        mock_model.classes_ = np.array([0, 1, 2])
+            # Set up mock builder
+            mock_builder = MagicMock(spec=FeatureBuilder)
+            mock_builder.features_for_match.return_value = {
+                c: 0.0 for c in FEATURE_COLUMNS
+            }
+            mock_builder.get_team_state.return_value = {
+                "MatchesPlayed": 10, "FormPts": 2.0, "FormGD": 0.5,
+                "FormHome": 2.0, "FormAway": 1.5, "GoalsFor": 1.5,
+                "GoalsAgainst": 1.0, "Streak": 1, "Elo": 1500.0,
+                "Position": 5, "League": 0,
+            }
 
-        dummy_df = pd.DataFrame({"HomeTeam": ["A"], "AwayTeam": ["B"]})
+            with patch.object(app_mod, "_get_feature_builder", return_value=mock_builder):
+                # Mock model
+                mock_model = MagicMock()
+                mock_model.predict_proba.return_value = np.array([[0.5, 0.3, 0.2]])
+                mock_model.classes_ = np.array([0, 1, 2])
 
-        result = predict_match(mock_model, "Arsenal", "Chelsea", dummy_df)
+                dummy_df = pd.DataFrame({"HomeTeam": ["A"], "AwayTeam": ["B"]})
 
-        # features_for_match must have been called
-        mock_builder.features_for_match.assert_called_once()
+                result = predict_match_fn(mock_model, "Arsenal", "Chelsea", dummy_df)
+
+                # features_for_match must have been called
+                mock_builder.features_for_match.assert_called_once()
 
     def test_features_for_match_keys_match_feature_columns(self):
         """FeatureBuilder.features_for_match() returns keys compatible with FEATURE_COLUMNS."""
