@@ -673,12 +673,488 @@ with tab_odds:
 
     odds_mode = st.radio(
         "Inmatning:",
-        ["Manuell (skriv in odds)", "Från data (historiska matcher)"],
+        ["Aktuell omgång (importera)", "Manuell (skriv in odds)", "Från data (historiska matcher)"],
         key="odds_mode",
         horizontal=True,
     )
 
-    if odds_mode == "Manuell (skriv in odds)":
+    if odds_mode == "Aktuell omgång (importera)":
+        from matchday_import import (
+            parse_fixtures_csv,
+            parse_odds_csv,
+            parse_streck_csv,
+            match_matchday_data,
+            MatchdayImportStatus,
+            MatchdayMatch,
+            generate_fixtures_template,
+            generate_odds_template,
+            generate_streck_template,
+            FIXTURES_TEMPLATE_CSV,
+            ODDS_TEMPLATE_CSV,
+            ODDS_MULTI_BM_TEMPLATE_CSV,
+            ODDS_SIMPLE_TEMPLATE_CSV,
+            STRECK_TEMPLATE_CSV,
+        )
+
+        st.subheader("Aktuell omgang — importera fixtures, odds & streck")
+        st.markdown(
+            "Ladda in aktuell omgangs matcher, odds och streckdata i tre steg. "
+            "Appen matchar automatiskt och visar analys."
+        )
+
+        # ----- CSV-mallar for nedladdning -----
+        with st.expander("Ladda ner CSV-mallar", expanded=False):
+            st.markdown(
+                "Anvand dessa mallar for att forbereda din data. "
+                "Fyll i med aktuella varden och ladda upp nedan."
+            )
+            tcol1, tcol2, tcol3 = st.columns(3)
+            with tcol1:
+                st.download_button(
+                    "Fixtures-mall (.csv)",
+                    FIXTURES_TEMPLATE_CSV,
+                    "fixtures_mall.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.caption("Kolumner: HomeTeam, AwayTeam")
+            with tcol2:
+                st.download_button(
+                    "Odds-mall (.csv)",
+                    ODDS_TEMPLATE_CSV,
+                    "odds_mall.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.caption("Kolumner: HomeTeam, AwayTeam, B365H, B365D, B365A")
+            with tcol3:
+                st.download_button(
+                    "Streck-mall (.csv)",
+                    STRECK_TEMPLATE_CSV,
+                    "streck_mall.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.caption("Kolumner: HomeTeam, AwayTeam, Streck1, StreckX, Streck2")
+
+            st.markdown("---")
+            st.markdown("**Oddsformat som stods:**")
+            st.markdown(
+                "- **football-data.co.uk-format:** B365H/B365D/B365A, PSH/PSD/PSA, BWH/BWD/BWA, etc.\n"
+                "- **Enkelt format:** Home/Draw/Away\n"
+                "- Flera bookmakers per rad stods (t.ex. B365 + Pinnacle)."
+            )
+            st.download_button(
+                "Odds-mall med flera bookmakers (.csv)",
+                ODDS_MULTI_BM_TEMPLATE_CSV,
+                "odds_multi_bm_mall.csv",
+                mime="text/csv",
+            )
+            st.download_button(
+                "Odds-mall enkelt format (.csv)",
+                ODDS_SIMPLE_TEMPLATE_CSV,
+                "odds_simple_mall.csv",
+                mime="text/csv",
+            )
+
+        st.markdown("---")
+
+        # ----- Steg 1: Fixtures -----
+        st.markdown("### Steg 1: Ladda in matcher (fixtures)")
+        fixtures_file = st.file_uploader(
+            "CSV med matcher (HomeTeam, AwayTeam)",
+            type=["csv"],
+            key="matchday_fixtures_upload",
+        )
+
+        # ----- Steg 2: Odds -----
+        st.markdown("### Steg 2: Ladda in odds")
+        odds_file = st.file_uploader(
+            "CSV med odds (HomeTeam, AwayTeam + oddskolumner)",
+            type=["csv"],
+            key="matchday_odds_upload",
+        )
+
+        # ----- Steg 3: Streck -----
+        st.markdown("### Steg 3: Ladda in streckprocent")
+        streck_file = st.file_uploader(
+            "CSV med streck (HomeTeam, AwayTeam, Streck1, StreckX, Streck2)",
+            type=["csv"],
+            key="matchday_streck_upload",
+        )
+
+        st.markdown("---")
+
+        # ----- Bearbeta import -----
+        if fixtures_file is not None or odds_file is not None:
+            all_import_errors: List[str] = []
+            fixtures_list = []
+            odds_by_key: Dict = {}
+            streck_by_key: Dict = {}
+            odds_rows_loaded = 0
+            streck_rows_loaded = 0
+
+            # Parse fixtures
+            if fixtures_file is not None:
+                try:
+                    fixtures_df = pd.read_csv(fixtures_file)
+                    fixtures_list, fix_errors = parse_fixtures_csv(fixtures_df)
+                    all_import_errors.extend(fix_errors)
+                except Exception as e:
+                    all_import_errors.append(f"Kunde inte lasa fixtures-CSV: {e}")
+            else:
+                st.info("Ladda upp en fixtures-fil for att starta.")
+
+            # Parse odds
+            if odds_file is not None:
+                try:
+                    odds_df = pd.read_csv(odds_file)
+                    odds_by_key, odds_rows_loaded, odds_errors = parse_odds_csv(odds_df)
+                    all_import_errors.extend(odds_errors)
+                except Exception as e:
+                    all_import_errors.append(f"Kunde inte lasa odds-CSV: {e}")
+
+                # If no fixtures file, create fixtures from odds
+                if not fixtures_list and odds_by_key:
+                    st.info(
+                        "Ingen separat fixtures-fil uppladdad — "
+                        "anvander matcher fran odds-filen."
+                    )
+                    from matchday_import import MatchdayFixture
+                    for key, entries in odds_by_key.items():
+                        parts = key.split("_", 1)
+                        if len(parts) == 2:
+                            fixtures_list.append(MatchdayFixture(
+                                home_team=parts[0],
+                                away_team=parts[1],
+                                match_key=key,
+                            ))
+
+            # Parse streck
+            if streck_file is not None:
+                try:
+                    streck_df = pd.read_csv(streck_file)
+                    streck_by_key, streck_rows_loaded, streck_errors = parse_streck_csv(streck_df)
+                    all_import_errors.extend(streck_errors)
+                except Exception as e:
+                    all_import_errors.append(f"Kunde inte lasa streck-CSV: {e}")
+
+            # Match data
+            if fixtures_list:
+                matchday_matches, import_status = match_matchday_data(
+                    fixtures_list, odds_by_key, streck_by_key,
+                )
+
+                # ---- Importstatus-dashboard ----
+                st.subheader("Importstatus")
+                scol1, scol2, scol3, scol4 = st.columns(4)
+                with scol1:
+                    st.metric("Fixtures", import_status.fixtures_count)
+                with scol2:
+                    st.metric("Med odds", import_status.odds_matched)
+                with scol3:
+                    st.metric("Med streck", import_status.streck_matched)
+                with scol4:
+                    st.metric("Komplett", import_status.fully_matched)
+
+                # Visa omatchade
+                has_unmatched = (
+                    import_status.fixtures_without_odds
+                    or import_status.fixtures_without_streck
+                    or import_status.unmatched_odds
+                    or import_status.unmatched_streck
+                )
+                if has_unmatched:
+                    with st.expander("Omatchade rader", expanded=False):
+                        if import_status.fixtures_without_odds:
+                            st.markdown("**Fixtures utan odds:**")
+                            for item in import_status.fixtures_without_odds:
+                                st.caption(f"- {item}")
+                        if import_status.fixtures_without_streck:
+                            st.markdown("**Fixtures utan streck:**")
+                            for item in import_status.fixtures_without_streck:
+                                st.caption(f"- {item}")
+                        if import_status.unmatched_odds:
+                            st.markdown("**Oddsrader utan matchande fixture:**")
+                            for item in import_status.unmatched_odds:
+                                st.caption(f"- {item}")
+                        if import_status.unmatched_streck:
+                            st.markdown("**Streckrader utan matchande fixture:**")
+                            for item in import_status.unmatched_streck:
+                                st.caption(f"- {item}")
+
+                # Visa felmeddelanden
+                if all_import_errors:
+                    with st.expander(f"Felmeddelanden ({len(all_import_errors)})", expanded=False):
+                        for err in all_import_errors:
+                            st.caption(f"- {err}")
+
+                st.markdown("---")
+
+                # ---- Analys for matchade matcher ----
+                matches_with_odds = [m for m in matchday_matches if m.has_odds and m.odds_report]
+
+                if matches_with_odds:
+                    # --- Ranking: snabboversikt ---
+                    value_reports_list = [
+                        m.value_report for m in matches_with_odds
+                        if m.value_report is not None
+                    ]
+
+                    if value_reports_list:
+                        from value_analysis import rank_outcomes_by_edge, rank_matches_by_interest
+                        st.subheader("Snabboversikt — mest intressanta utfall")
+                        ranked_outcomes = rank_outcomes_by_edge(value_reports_list)
+
+                        positive_outcomes = [r for r in ranked_outcomes if r[2].edge > 0.001]
+                        negative_outcomes = [r for r in ranked_outcomes if r[2].edge < -0.001]
+
+                        if positive_outcomes:
+                            st.markdown("**Hogst positiv edge:**")
+                            pos_rows = []
+                            for match_label, outcome_label, ov in positive_outcomes[:10]:
+                                pos_rows.append({
+                                    "Match": match_label,
+                                    "Utfall": outcome_label,
+                                    "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                    "Edge": f"{ov.edge:+.1%}",
+                                    "Exp. return": f"{ov.expected_return:+.1%}",
+                                    "Bedomning": ov.edge_label,
+                                })
+                            st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
+
+                        if negative_outcomes:
+                            st.markdown("**Mest negativa edge:**")
+                            neg_rows = []
+                            for match_label, outcome_label, ov in reversed(negative_outcomes[-5:]):
+                                neg_rows.append({
+                                    "Match": match_label,
+                                    "Utfall": outcome_label,
+                                    "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                    "Edge": f"{ov.edge:+.1%}",
+                                    "Exp. return": f"{ov.expected_return:+.1%}",
+                                    "Bedomning": ov.edge_label,
+                                })
+                            st.dataframe(pd.DataFrame(neg_rows), use_container_width=True, hide_index=True)
+
+                        if not positive_outcomes and not negative_outcomes:
+                            st.info("Ingen tydlig edge hittades bland aktuella matcher.")
+
+                    # --- Streckranking ---
+                    streck_reports_list = [
+                        m.streck_report for m in matches_with_odds
+                        if m.streck_report is not None
+                    ]
+                    if streck_reports_list:
+                        from streck_analysis import (
+                            rank_outcomes_by_streck_delta,
+                            rank_matches_by_streck_interest,
+                        )
+                        st.divider()
+                        st.subheader("Streckjamforelse — over- & understreckade")
+
+                        ranked_streck_outcomes = rank_outcomes_by_streck_delta(streck_reports_list)
+
+                        understreck = [r for r in ranked_streck_outcomes if r[2].delta < -0.001]
+                        if understreck:
+                            st.markdown("**Mest understreckade utfall:**")
+                            us_rows = []
+                            for match_label, outcome_label, os_item in understreck[:10]:
+                                us_rows.append({
+                                    "Match": match_label,
+                                    "Utfall": outcome_label,
+                                    "Fair prob": f"{os_item.fair_prob:.1%}",
+                                    "Streck": f"{os_item.streck_pct:.1%}",
+                                    "Delta": f"{os_item.delta:+.1%}",
+                                    "Bedomning": "understreckad",
+                                })
+                            st.dataframe(pd.DataFrame(us_rows), use_container_width=True, hide_index=True)
+
+                        overstreck = [r for r in reversed(ranked_streck_outcomes) if r[2].delta > 0.001]
+                        if overstreck:
+                            st.markdown("**Mest overstreckade utfall:**")
+                            os_rows = []
+                            for match_label, outcome_label, os_item in overstreck[:10]:
+                                os_rows.append({
+                                    "Match": match_label,
+                                    "Utfall": outcome_label,
+                                    "Fair prob": f"{os_item.fair_prob:.1%}",
+                                    "Streck": f"{os_item.streck_pct:.1%}",
+                                    "Delta": f"{os_item.delta:+.1%}",
+                                    "Bedomning": "overstreckad",
+                                })
+                            st.dataframe(pd.DataFrame(os_rows), use_container_width=True, hide_index=True)
+
+                        ranked_streck_matches = rank_matches_by_streck_interest(streck_reports_list)
+                        if ranked_streck_matches:
+                            st.markdown("**Mest intressanta matcher (storst streckavvikelse):**")
+                            mi_rows = []
+                            for sr in ranked_streck_matches[:10]:
+                                mi_rows.append({
+                                    "Match": f"{sr.home_team} vs {sr.away_team}",
+                                    "Storsta avvikelse": f"{sr.max_abs_delta:+.1%}",
+                                })
+                            st.dataframe(pd.DataFrame(mi_rows), use_container_width=True, hide_index=True)
+
+                    st.divider()
+
+                    # --- Detaljvy per match ---
+                    st.subheader("Detaljvy per match")
+
+                    for match in matchday_matches:
+                        if not match.odds_report:
+                            # Match without odds — show minimal info
+                            with st.expander(
+                                f"{match.home_team} vs {match.away_team}  |  Inga odds"
+                            ):
+                                st.caption("Ingen oddsdata tillganglig for denna match.")
+                                if match.has_streck and match.streck:
+                                    st.markdown(
+                                        f"**Streck:** 1={match.streck['1']:.0f}% / "
+                                        f"X={match.streck['X']:.0f}% / "
+                                        f"2={match.streck['2']:.0f}%"
+                                    )
+                            continue
+
+                        rpt = match.odds_report
+                        vr = match.value_report
+
+                        # Build expander label
+                        if vr is not None and vr.outcomes:
+                            max_edge = max(ov.edge for ov in vr.outcomes)
+                            edge_hint = f"  |  Hogsta edge: {max_edge:+.1%}" if abs(max_edge) > 0.001 else ""
+                        else:
+                            edge_hint = ""
+
+                        status_parts = []
+                        if match.has_odds:
+                            status_parts.append("odds")
+                        if match.has_streck:
+                            status_parts.append("streck")
+                        status_tag = " + ".join(status_parts) if status_parts else "partiell"
+
+                        with st.expander(
+                            f"{match.home_team} vs {match.away_team}  |  "
+                            f"Overround: {rpt.overround:.1f}%{edge_hint}  [{status_tag}]"
+                        ):
+                            num_bm = len(rpt.bookmaker_odds)
+
+                            # Bookmaker odds table
+                            bm_rows = []
+                            for e in rpt.bookmaker_odds:
+                                bm_rows.append({
+                                    "Bookmaker": e.bookmaker,
+                                    "1 (Hemma)": f"{e.home:.2f}",
+                                    "X (Oavgjort)": f"{e.draw:.2f}",
+                                    "2 (Borta)": f"{e.away:.2f}",
+                                })
+                            st.dataframe(pd.DataFrame(bm_rows), use_container_width=True, hide_index=True)
+
+                            # Value analysis
+                            if vr is not None:
+                                st.markdown("**Value-analys:**")
+                                st.caption(f"Jamforelsekalla: {vr.comparison_source}")
+                                value_rows = []
+                                for ov in vr.outcomes:
+                                    label = {"1": "Hemma (1)", "X": "Oavgjort (X)", "2": "Borta (2)"}[ov.outcome]
+                                    value_rows.append({
+                                        "Utfall": label,
+                                        "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                        "Market fair prob": f"{ov.market_fair_prob:.1%}",
+                                        "Comparison prob": f"{ov.comparison_prob:.1%}",
+                                        "Edge": f"{ov.edge:+.1%}",
+                                        "Expected return": f"{ov.expected_return:+.1%}",
+                                        "Bedomning": ov.edge_label,
+                                    })
+                                st.dataframe(pd.DataFrame(value_rows), use_container_width=True, hide_index=True)
+                            else:
+                                # Fallback: show probabilities only
+                                prob_table = {
+                                    "Utfall": ["Hemma (1)", "Oavgjort (X)", "Borta (2)"],
+                                    "Implicit sannol.": [
+                                        f"{rpt.implied_probs['1']:.1%}",
+                                        f"{rpt.implied_probs['X']:.1%}",
+                                        f"{rpt.implied_probs['2']:.1%}",
+                                    ],
+                                    "Fair sannol.": [
+                                        f"{rpt.fair_probs['1']:.1%}",
+                                        f"{rpt.fair_probs['X']:.1%}",
+                                        f"{rpt.fair_probs['2']:.1%}",
+                                    ],
+                                }
+                                st.dataframe(pd.DataFrame(prob_table), use_container_width=True, hide_index=True)
+
+                            # Best odds
+                            if num_bm > 1 and rpt.best_odds:
+                                st.markdown("**Basta odds per utfall:**")
+                                for outcome in ["1", "X", "2"]:
+                                    if outcome in rpt.best_odds:
+                                        oval, obm = rpt.best_odds[outcome]
+                                        label = {"1": "Hemma", "X": "Oavgjort", "2": "Borta"}[outcome]
+                                        st.write(f"- {label} ({outcome}): **{oval:.2f}** ({obm})")
+
+                            # Streck comparison
+                            if match.streck_report is not None:
+                                st.markdown("**Streckjamforelse:**")
+                                streck_rows = []
+                                for os_item in match.streck_report.outcomes:
+                                    olabel = {"1": "Hemma (1)", "X": "Oavgjort (X)", "2": "Borta (2)"}[os_item.outcome]
+                                    if os_item.label == "understreckad":
+                                        badge = "understreckad"
+                                    elif os_item.label == "overstreckad":
+                                        badge = "overstreckad"
+                                    else:
+                                        badge = "neutral"
+                                    streck_rows.append({
+                                        "Utfall": olabel,
+                                        "Fair market prob": f"{os_item.fair_prob:.1%}",
+                                        "Streckprocent": f"{os_item.streck_pct:.1%}",
+                                        "Delta": f"{os_item.delta:+.1%}",
+                                        "Bedomning": badge,
+                                    })
+                                st.dataframe(pd.DataFrame(streck_rows), use_container_width=True, hide_index=True)
+                            elif match.has_streck and match.streck:
+                                st.markdown(
+                                    f"**Streck (ra):** 1={match.streck['1']:.0f}% / "
+                                    f"X={match.streck['X']:.0f}% / "
+                                    f"2={match.streck['2']:.0f}%"
+                                )
+
+                    st.caption(
+                        "Value-analysen bygger pa marknadskonsensus mellan bookmakers. "
+                        "Streckjamforelsen visar skillnaden mellan folkets streck och "
+                        "marknadens fair probability."
+                    )
+
+                elif not matches_with_odds and matchday_matches:
+                    st.warning(
+                        "Inga matcher har giltiga odds. "
+                        "Ladda upp en odds-fil for att se analys."
+                    )
+
+                    # Show fixtures without odds as a list
+                    st.markdown("**Laddade fixtures:**")
+                    for m in matchday_matches:
+                        streck_info = ""
+                        if m.has_streck and m.streck:
+                            streck_info = (
+                                f" — Streck: 1={m.streck['1']:.0f}% / "
+                                f"X={m.streck['X']:.0f}% / "
+                                f"2={m.streck['2']:.0f}%"
+                            )
+                        st.caption(f"- {m.home_team} vs {m.away_team}{streck_info}")
+            else:
+                st.info(
+                    "Ladda upp minst en fil (fixtures eller odds) for att borja. "
+                    "Ladda ner CSV-mallarna ovan for att se ratt format."
+                )
+        else:
+            st.info(
+                "Ladda upp filer for att importera aktuell omgangs data. "
+                "Borja med att ladda ner mallarna ovan."
+            )
+
+    elif odds_mode == "Manuell (skriv in odds)":
         st.subheader("1. Ange 1X2-odds")
         ocol1, ocol2, ocol3 = st.columns(3)
         with ocol1:
