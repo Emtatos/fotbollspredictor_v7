@@ -20,7 +20,9 @@ Anvandning:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -165,6 +167,206 @@ def parse_fixtures_csv(
         errors.append("Inga giltiga fixtures hittades.")
 
     return fixtures, errors
+
+
+# ---------------------------------------------------------------------------
+# Text-based fixture parsing (paste match list)
+# ---------------------------------------------------------------------------
+
+# Regex: splits on " - ", " – ", " — ", "-", "–", "—", " vs ", " vs. "
+_FIXTURE_LINE_RE = re.compile(
+    r'\s*[-–—]\s*|\s+vs\.?\s+',
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class ParseFixtureLinesResult:
+    """Result of parsing pasted fixture text."""
+    fixtures: List[MatchdayFixture]
+    invalid_lines: List[str]
+    total_lines: int
+    blank_lines: int
+    valid_count: int
+    invalid_count: int
+
+
+def parse_fixture_lines(text: str) -> ParseFixtureLinesResult:
+    """
+    Parsar inklistrad matchtext till fixtures.
+
+    Stodjer rader som:
+      - "Leeds United - Brentford"
+      - "Leeds United – Brentford"
+      - "Leeds United — Brentford"
+      - "Leeds United vs Brentford"
+      - "Leeds United vs. Brentford"
+
+    Tomma rader ignoreras. Rader som inte kan tolkas rapporteras.
+
+    Returnerar ParseFixtureLinesResult med fixtures, ogiltiga rader och statistik.
+    """
+    lines = text.split("\n")
+    total_lines = len(lines)
+    blank_lines = 0
+    fixtures: List[MatchdayFixture] = []
+    invalid_lines: List[str] = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            blank_lines += 1
+            continue
+
+        parts = _FIXTURE_LINE_RE.split(line, maxsplit=1)
+
+        if len(parts) != 2:
+            invalid_lines.append(line)
+            continue
+
+        home_raw = parts[0].strip()
+        away_raw = parts[1].strip()
+
+        if not home_raw or not away_raw:
+            invalid_lines.append(line)
+            continue
+
+        key = _make_key(home_raw, away_raw)
+        fixtures.append(MatchdayFixture(
+            home_team=home_raw,
+            away_team=away_raw,
+            match_key=key,
+        ))
+
+    return ParseFixtureLinesResult(
+        fixtures=fixtures,
+        invalid_lines=invalid_lines,
+        total_lines=total_lines,
+        blank_lines=blank_lines,
+        valid_count=len(fixtures),
+        invalid_count=len(invalid_lines),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Automatic odds fetching from football-data.co.uk CSV files
+# ---------------------------------------------------------------------------
+
+def _find_season_csvs(data_dir: Optional[Path] = None) -> List[Path]:
+    """
+    Hittar alla ligasasongens CSV-filer i data-mappen.
+
+    Letar efter filer som matchar E0_2526.csv, E1_2425.csv etc.
+    Returnerar lista sorterad med senaste sasong forst.
+    """
+    if data_dir is None:
+        data_dir = Path("data")
+
+    if not data_dir.exists():
+        return []
+
+    csv_pattern = re.compile(r'^(E\d)_(\d{4})\.csv$')
+    found: List[Tuple[str, Path]] = []
+
+    for p in data_dir.iterdir():
+        if p.is_file():
+            m = csv_pattern.match(p.name)
+            if m:
+                season_code = m.group(2)
+                found.append((season_code, p))
+
+    # Sort by season code descending (latest first)
+    found.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in found]
+
+
+def fetch_odds_for_fixtures(
+    fixtures: List[MatchdayFixture],
+    data_dir: Optional[Path] = None,
+) -> Tuple[Dict[str, List[OddsEntry]], int, int, List[str]]:
+    """
+    Hamtar odds automatiskt fran football-data.co.uk CSV-filer i data-mappen.
+
+    For varje fixture letas i de senaste CSV-filerna efter en match med
+    samma hemma- och bortalag. Odds extraheras fran alla tillgangliga
+    bookmaker-kolumner.
+
+    Parametrar
+    ----------
+    fixtures : List[MatchdayFixture]
+        Lista av fixtures att hamta odds for.
+    data_dir : Path, optional
+        Sokvag till data-mappen. Standard: data/
+
+    Returnerar
+    ----------
+    (odds_by_key, matched_count, unmatched_count, unmatched_labels)
+        odds_by_key: Dict[match_key] -> List[OddsEntry]
+        matched_count: antal fixtures med hittade odds
+        unmatched_count: antal fixtures utan odds
+        unmatched_labels: lista av "Home vs Away" for omatchade fixtures
+    """
+    csv_files = _find_season_csvs(data_dir)
+
+    if not csv_files:
+        labels = [f"{f.home_team} vs {f.away_team}" for f in fixtures]
+        return {}, 0, len(fixtures), labels
+
+    # Load all CSVs, newest season first, and build a lookup of odds by
+    # normalized (home, away) pair. Newest season data takes precedence.
+    odds_rows: Dict[str, Tuple[pd.Series, pd.Index]] = {}
+
+    for csv_path in csv_files:
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as exc:
+            logger.warning("Kunde inte lasa %s: %s", csv_path, exc)
+            continue
+
+        if "HomeTeam" not in df.columns or "AwayTeam" not in df.columns:
+            continue
+
+        for idx, row in df.iterrows():
+            home_raw = str(row.get("HomeTeam", "")).strip()
+            away_raw = str(row.get("AwayTeam", "")).strip()
+            if not home_raw or not away_raw or home_raw == "nan" or away_raw == "nan":
+                continue
+
+            norm_key = _make_key(home_raw, away_raw)
+            # Only keep the first (newest season) entry per match
+            if norm_key not in odds_rows:
+                odds_rows[norm_key] = (row, df.columns)
+
+    # Now match fixtures against the odds lookup
+    odds_by_key: Dict[str, List[OddsEntry]] = {}
+    unmatched_labels: List[str] = []
+
+    for fixture in fixtures:
+        fkey = fixture.match_key
+
+        # Try exact key, then lowercase fallback
+        row_data = odds_rows.get(fkey)
+        if row_data is None:
+            row_data = odds_rows.get(fkey.lower()) if fkey.lower() != fkey else None
+        if row_data is None:
+            # Try re-normalizing fixture teams against the odds lookup
+            norm_key = _make_key(fixture.home_team, fixture.away_team)
+            row_data = odds_rows.get(norm_key)
+
+        if row_data is not None:
+            row, columns = row_data
+            from odds_tool import extract_odds_from_row
+            entries = extract_odds_from_row(row, columns)
+            if entries:
+                odds_by_key[fkey] = entries
+                continue
+
+        unmatched_labels.append(f"{fixture.home_team} vs {fixture.away_team}")
+
+    matched_count = len(odds_by_key)
+    unmatched_count = len(fixtures) - matched_count
+
+    return odds_by_key, matched_count, unmatched_count, unmatched_labels
 
 
 # ---------------------------------------------------------------------------

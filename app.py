@@ -681,11 +681,15 @@ with tab_odds:
     if odds_mode == "Aktuell omgång (importera)":
         from matchday_import import (
             parse_fixtures_csv,
+            parse_fixture_lines,
+            fetch_odds_for_fixtures,
+            ParseFixtureLinesResult,
             parse_odds_csv,
             parse_streck_csv,
             match_matchday_data,
             MatchdayImportStatus,
             MatchdayMatch,
+            MatchdayFixture,
             generate_fixtures_template,
             generate_odds_template,
             generate_streck_template,
@@ -702,10 +706,10 @@ with tab_odds:
             get_saved_matchday_status,
         )
 
-        st.subheader("Aktuell omgang — importera fixtures, odds & streck")
+        st.subheader("Aktuell omgang — klistra in matcher & hamta odds")
         st.markdown(
-            "Ladda in aktuell omgangs matcher, odds och streckdata i tre steg. "
-            "Appen matchar automatiskt och visar analys."
+            "Klistra in matchlistan nedan. Appen hamtar odds automatiskt "
+            "fran tillganglig data och visar analys."
         )
 
         # ----- Sparad omgangsdata: status och atgarder -----
@@ -757,7 +761,7 @@ with tab_odds:
             if use_saved:
                 st.session_state["matchday_data_source"] = "saved"
         else:
-            st.caption("Ingen sparad omgang. Ladda upp filer nedan.")
+            st.caption("Ingen sparad omgang.")
 
         # ----- Ladda sparad data om anvandaren valde det -----
         _use_saved_data = st.session_state.get("matchday_data_source") == "saved"
@@ -777,11 +781,40 @@ with tab_odds:
 
         st.markdown("---")
 
-        # ----- CSV-mallar for nedladdning -----
-        with st.expander("Ladda ner CSV-mallar", expanded=False):
+        # =====================================================================
+        # PRIMÄR VÄG: Klistra in matchlista
+        # =====================================================================
+        st.markdown("### Klistra in matcher")
+        st.caption(
+            "Skriv en match per rad. Stodda separatorer: `-`, `–`, `vs`  \n"
+            "Exempel: `Leeds United - Brentford`"
+        )
+        match_text = st.text_area(
+            "Matcher (en per rad)",
+            height=180,
+            placeholder="Leeds United - Brentford\nEverton – Chelsea\nFulham vs Burnley",
+            key="matchday_text_input",
+        )
+        analyze_btn = st.button(
+            "Analysera omgang",
+            type="primary",
+            use_container_width=True,
+            key="btn_analyze_matchday",
+        )
+
+        # ----- Valfritt: streck-CSV -----
+        st.markdown("### Streckdata (valfritt)")
+        streck_file = st.file_uploader(
+            "CSV med streck (HomeTeam, AwayTeam, Streck1, StreckX, Streck2)",
+            type=["csv"],
+            key="matchday_streck_upload",
+        )
+
+        # ----- Sekundar fallback: CSV-import -----
+        with st.expander("Alternativ: importera via CSV-filer", expanded=False):
             st.markdown(
-                "Anvand dessa mallar for att forbereda din data. "
-                "Fyll i med aktuella varden och ladda upp nedan."
+                "Om du vill ladda upp fixtures och/eller odds som CSV istallet. "
+                "Anvand mallarna nedan."
             )
             tcol1, tcol2, tcol3 = st.columns(3)
             with tcol1:
@@ -832,35 +865,21 @@ with tab_odds:
                 mime="text/csv",
             )
 
-        st.markdown("---")
-
-        # ----- Steg 1: Fixtures -----
-        st.markdown("### Steg 1: Ladda in matcher (fixtures)")
-        fixtures_file = st.file_uploader(
-            "CSV med matcher (HomeTeam, AwayTeam)",
-            type=["csv"],
-            key="matchday_fixtures_upload",
-        )
-
-        # ----- Steg 2: Odds -----
-        st.markdown("### Steg 2: Ladda in odds")
-        odds_file = st.file_uploader(
-            "CSV med odds (HomeTeam, AwayTeam + oddskolumner)",
-            type=["csv"],
-            key="matchday_odds_upload",
-        )
-
-        # ----- Steg 3: Streck -----
-        st.markdown("### Steg 3: Ladda in streckprocent")
-        streck_file = st.file_uploader(
-            "CSV med streck (HomeTeam, AwayTeam, Streck1, StreckX, Streck2)",
-            type=["csv"],
-            key="matchday_streck_upload",
-        )
+            st.markdown("---")
+            fixtures_file = st.file_uploader(
+                "CSV med matcher (HomeTeam, AwayTeam)",
+                type=["csv"],
+                key="matchday_fixtures_upload",
+            )
+            odds_file = st.file_uploader(
+                "CSV med odds (HomeTeam, AwayTeam + oddskolumner)",
+                type=["csv"],
+                key="matchday_odds_upload",
+            )
 
         st.markdown("---")
 
-        # ----- Bearbeta import (ny upload ELLER sparad data) -----
+        # ----- Bearbeta import -----
         matchday_matches = None
         import_status = None
         _matchday_data_ready = False
@@ -883,7 +902,85 @@ with tab_odds:
                 st.session_state["matchday_data_source"] = "saved"
                 _matchday_data_ready = True
 
+        elif analyze_btn and match_text and match_text.strip():
+            # ============================================================
+            # PRIMÄR VÄG: text-paste + automatisk oddshämtning
+            # ============================================================
+            parse_result = parse_fixture_lines(match_text)
+
+            # -- Visa parsingstatus --
+            st.markdown("#### Parsingstatus")
+            pcol1, pcol2, pcol3 = st.columns(3)
+            with pcol1:
+                st.metric("Giltiga matcher", parse_result.valid_count)
+            with pcol2:
+                st.metric("Ogiltiga rader", parse_result.invalid_count)
+            with pcol3:
+                st.metric("Tomma rader", parse_result.blank_lines)
+
+            if parse_result.invalid_lines:
+                with st.expander(
+                    f"Kunde inte tolka {len(parse_result.invalid_lines)} rad(er)",
+                    expanded=True,
+                ):
+                    for bad_line in parse_result.invalid_lines:
+                        st.caption(f"- `{bad_line}`")
+
+            if not parse_result.fixtures:
+                st.warning("Inga giltiga matcher hittades. Kontrollera formatet.")
+            else:
+                fixtures_list = parse_result.fixtures
+
+                # -- Hamta odds automatiskt --
+                odds_by_key, odds_matched, odds_unmatched, unmatched_labels = (
+                    fetch_odds_for_fixtures(fixtures_list)
+                )
+
+                # -- Visa oddshämtningsstatus --
+                st.markdown("#### Oddsstatus")
+                ocol1, ocol2 = st.columns(2)
+                with ocol1:
+                    st.metric("Matcher med odds", odds_matched)
+                with ocol2:
+                    st.metric("Matcher utan odds", odds_unmatched)
+
+                if unmatched_labels:
+                    with st.expander(
+                        f"Matcher utan odds ({len(unmatched_labels)})",
+                        expanded=False,
+                    ):
+                        for label in unmatched_labels:
+                            st.caption(f"- {label}")
+
+                # -- Streck (valfri CSV) --
+                streck_by_key: Dict = {}
+                if streck_file is not None:
+                    try:
+                        streck_df = pd.read_csv(streck_file)
+                        streck_by_key, _srl, streck_errors = parse_streck_csv(streck_df)
+                        if streck_errors:
+                            with st.expander(f"Streckfel ({len(streck_errors)})"):
+                                for err in streck_errors:
+                                    st.caption(f"- {err}")
+                    except Exception as e:
+                        st.warning(f"Kunde inte lasa streck-CSV: {e}")
+
+                # -- Match + analysera --
+                matchday_matches, import_status = match_matchday_data(
+                    fixtures_list, odds_by_key, streck_by_key,
+                )
+
+                # Spara automatiskt
+                if save_matchday_data(fixtures_list, odds_by_key, streck_by_key):
+                    st.session_state["matchday_data_source"] = "textpaste"
+                    st.caption("Omgangsdata sparad automatiskt for ateranvandning.")
+
+                _matchday_data_ready = True
+
         elif fixtures_file is not None or odds_file is not None:
+            # ============================================================
+            # SEKUNDÄR VÄG: CSV-import (fallback)
+            # ============================================================
             all_import_errors: List[str] = []
             fixtures_list = []
             odds_by_key: Dict = {}
@@ -899,8 +996,6 @@ with tab_odds:
                     all_import_errors.extend(fix_errors)
                 except Exception as e:
                     all_import_errors.append(f"Kunde inte lasa fixtures-CSV: {e}")
-            else:
-                st.info("Ladda upp en fixtures-fil for att starta.")
 
             # Parse odds
             if odds_file is not None:
@@ -917,7 +1012,6 @@ with tab_odds:
                         "Ingen separat fixtures-fil uppladdad — "
                         "anvander matcher fran odds-filen."
                     )
-                    from matchday_import import MatchdayFixture
                     for key, entries in odds_by_key.items():
                         parts = key.split("_", 1)
                         if len(parts) == 2:
@@ -957,8 +1051,8 @@ with tab_odds:
 
         else:
             st.info(
-                "Ladda upp filer for att importera aktuell omgangs data. "
-                "Borja med att ladda ner mallarna ovan."
+                "Klistra in matcher i textfaltet ovan och klicka **Analysera omgang** "
+                "for att starta."
             )
 
         # ---- Gemensam rendering: importstatus + analys ----
@@ -967,7 +1061,9 @@ with tab_odds:
             st.subheader("Importstatus")
             # Visa datakalla
             _data_src = st.session_state.get("matchday_data_source", "")
-            if _data_src == "nyimporterad":
+            if _data_src == "textpaste":
+                st.caption("Datakalla: inklistrad matchlista med automatisk oddshämtning.")
+            elif _data_src == "nyimporterad":
                 st.caption("Datakalla: nyimporterad (fran uppladdade filer).")
             elif _data_src == "saved":
                 st.caption("Datakalla: aterlast fran sparad omgang.")
