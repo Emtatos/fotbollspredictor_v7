@@ -673,7 +673,7 @@ with tab_odds:
 
     odds_mode = st.radio(
         "Inmatning:",
-        ["Aktuell omgång (importera)", "Manuell (skriv in odds)", "Från data (historiska matcher)"],
+        ["Aktuell omgång (importera)", "Kupongbild (screenshot)", "Manuell (skriv in odds)", "Från data (historiska matcher)"],
         key="odds_mode",
         horizontal=True,
     )
@@ -1357,6 +1357,448 @@ with tab_odds:
                             f"2={m.streck['2']:.0f}%"
                         )
                     st.caption(f"- {m.home_team} vs {m.away_team}{streck_info}")
+
+    elif odds_mode == "Kupongbild (screenshot)":
+        # ==================================================================
+        # KUPONGBILD-FLODE: bild -> tolkning -> kontrolltabell -> analys
+        # ==================================================================
+        from coupon_image_parser import (
+            parse_coupon_image,
+            coupon_rows_to_dataframe,
+            dataframe_to_coupon_rows,
+            confirmed_rows_to_matchday_data,
+            is_supported_image,
+            CouponRow,
+        )
+        from matchday_import import (
+            match_matchday_data,
+            fetch_odds_for_fixtures,
+            MatchdayFixture,
+        )
+        from matchday_storage import save_matchday_data
+
+        st.subheader("Kupongbild — ladda upp skarmbilden")
+        st.markdown(
+            "Ladda upp en skärmbild av kupongen. Appen extraherar matcher, "
+            "streckprocent och odds. Du granskar och rättar i en kontrolltabell "
+            "innan analysen körs."
+        )
+
+        # -- Bilduppladdning --
+        coupon_file = st.file_uploader(
+            "Välj kupongbild",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="coupon_image_upload",
+            help="Stödda format: PNG, JPG, JPEG, WEBP",
+        )
+
+        if coupon_file is not None:
+            # Visa bilden
+            st.image(coupon_file, caption="Uppladdad kupongbild", use_container_width=True)
+
+            # -- Extrahera data fran bilden --
+            if "coupon_extraction_df" not in st.session_state:
+                st.session_state["coupon_extraction_df"] = None
+                st.session_state["coupon_extraction_status"] = None
+
+            extract_btn = st.button(
+                "Extrahera matcher, streck & odds",
+                type="primary",
+                use_container_width=True,
+                key="btn_extract_coupon",
+            )
+
+            if extract_btn:
+                with st.spinner("Tolkar kupongbilden med AI..."):
+                    image_bytes = coupon_file.getvalue()
+                    result = parse_coupon_image(image_bytes, coupon_file.name)
+
+                if result.error:
+                    st.error(f"Tolkningsfel: {result.error}")
+                    if result.raw_response:
+                        with st.expander("Ratt API-svar (debug)"):
+                            st.code(result.raw_response)
+                elif not result.rows:
+                    st.warning("Inga matcher kunde tolkas fran bilden.")
+                else:
+                    df = coupon_rows_to_dataframe(result.rows)
+                    st.session_state["coupon_extraction_df"] = df
+                    st.session_state["coupon_extraction_status"] = {
+                        "total": result.total_rows,
+                        "complete": result.complete_rows,
+                        "uncertain": result.uncertain_rows,
+                        "incomplete": result.incomplete_rows,
+                    }
+
+            # -- Visa kontrolltabell om extraktion ar klar --
+            if st.session_state.get("coupon_extraction_df") is not None:
+                ext_status = st.session_state.get("coupon_extraction_status", {})
+
+                # -- Extraktionsstatus --
+                st.markdown("---")
+                st.subheader("Extraktionsstatus")
+                ecol1, ecol2, ecol3, ecol4 = st.columns(4)
+                with ecol1:
+                    st.metric("Rader tolkade", ext_status.get("total", 0))
+                with ecol2:
+                    st.metric("Fullstandiga", ext_status.get("complete", 0))
+                with ecol3:
+                    st.metric("Osakra", ext_status.get("uncertain", 0))
+                with ecol4:
+                    st.metric("Ofullstandiga", ext_status.get("incomplete", 0))
+
+                # -- Redigerbar kontrolltabell --
+                st.markdown("---")
+                st.subheader("Kontrolltabell — granska och ratta")
+                st.caption(
+                    "Ratta feltolkningar, ta bort trasiga rader, komplettera tomma varden. "
+                    "Analysen kors forst nar du bekraftar tabellen nedan."
+                )
+
+                edited_df = st.data_editor(
+                    st.session_state["coupon_extraction_df"],
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="coupon_data_editor",
+                    column_config={
+                        "HomeTeam": st.column_config.TextColumn("Hemmalag", required=True),
+                        "AwayTeam": st.column_config.TextColumn("Bortalag", required=True),
+                        "Streck1": st.column_config.NumberColumn("Streck 1 (%)", min_value=0, max_value=100, format="%.1f"),
+                        "StreckX": st.column_config.NumberColumn("Streck X (%)", min_value=0, max_value=100, format="%.1f"),
+                        "Streck2": st.column_config.NumberColumn("Streck 2 (%)", min_value=0, max_value=100, format="%.1f"),
+                        "Odds1": st.column_config.NumberColumn("Odds 1", min_value=1.01, format="%.2f"),
+                        "OddsX": st.column_config.NumberColumn("Odds X", min_value=1.01, format="%.2f"),
+                        "Odds2": st.column_config.NumberColumn("Odds 2", min_value=1.01, format="%.2f"),
+                        "Status": st.column_config.SelectboxColumn("Status", options=["ok", "uncertain", "incomplete"]),
+                        "Notes": st.column_config.TextColumn("Anteckningar"),
+                    },
+                )
+
+                # -- Bekrafta och kor analys --
+                confirm_btn = st.button(
+                    "Bekrafta tabell och kor analys",
+                    type="primary",
+                    use_container_width=True,
+                    key="btn_confirm_coupon",
+                )
+
+                if confirm_btn:
+                    # Konvertera redigerad tabell tillbaka till CouponRows
+                    confirmed_rows = dataframe_to_coupon_rows(edited_df)
+
+                    if not confirmed_rows:
+                        st.error("Inga giltiga rader i tabellen.")
+                    else:
+                        # Bygg matchday-data fran bekraftade rader
+                        fixtures, odds_by_key, streck_by_key, keys_with_odds, keys_missing_odds = (
+                            confirmed_rows_to_matchday_data(confirmed_rows)
+                        )
+
+                        # -- Fallback-odds for rader utan bildodds --
+                        fallback_keys: List[str] = []
+                        if keys_missing_odds:
+                            st.markdown("---")
+                            st.info(
+                                f"{len(keys_missing_odds)} match(er) saknar odds fran bilden. "
+                                f"Forsoker hamta fallback-odds fran historisk data..."
+                            )
+                            fallback_fixtures = [
+                                f for f in fixtures if f.match_key in keys_missing_odds
+                            ]
+                            if fallback_fixtures:
+                                fb_odds, fb_matched, fb_unmatched, fb_labels = (
+                                    fetch_odds_for_fixtures(fallback_fixtures)
+                                )
+                                for fkey, fentries in fb_odds.items():
+                                    odds_by_key[fkey] = fentries
+                                    fallback_keys.append(fkey)
+                                if fb_matched > 0:
+                                    st.success(f"Fallback-odds hittades for {fb_matched} match(er).")
+                                if fb_unmatched > 0:
+                                    st.warning(
+                                        f"{fb_unmatched} match(er) saknar fortfarande odds."
+                                    )
+                                    if fb_labels:
+                                        with st.expander("Matcher utan odds"):
+                                            for lbl in fb_labels:
+                                                st.caption(f"- {lbl}")
+
+                        # -- Oddskallstatus --
+                        st.markdown("---")
+                        st.subheader("Oddskallor")
+                        total_with_odds = len(keys_with_odds) + len(fallback_keys)
+                        total_without_odds = len(keys_missing_odds) - len(fallback_keys)
+                        ocol1, ocol2, ocol3 = st.columns(3)
+                        with ocol1:
+                            st.metric("Odds fran bild", len(keys_with_odds))
+                        with ocol2:
+                            st.metric("Odds fran fallback", len(fallback_keys))
+                        with ocol3:
+                            st.metric("Saknar odds", max(0, total_without_odds))
+
+                        # -- Koppla till befintlig analys --
+                        matchday_matches, import_status = match_matchday_data(
+                            fixtures, odds_by_key, streck_by_key,
+                        )
+
+                        # Spara data
+                        save_matchday_data(fixtures, odds_by_key, streck_by_key)
+                        st.session_state["matchday_data_source"] = "kupongbild"
+
+                        # -- Importstatus --
+                        st.markdown("---")
+                        st.subheader("Importstatus")
+                        st.caption("Datakalla: kupongbild (screenshot).")
+                        scol1, scol2, scol3, scol4 = st.columns(4)
+                        with scol1:
+                            st.metric("Fixtures", import_status.fixtures_count)
+                        with scol2:
+                            st.metric("Med odds", import_status.odds_matched)
+                        with scol3:
+                            st.metric("Med streck", import_status.streck_matched)
+                        with scol4:
+                            st.metric("Komplett", import_status.fully_matched)
+
+                        # Visa omatchade
+                        has_unmatched = (
+                            import_status.fixtures_without_odds
+                            or import_status.fixtures_without_streck
+                        )
+                        if has_unmatched:
+                            with st.expander("Omatchade rader", expanded=False):
+                                if import_status.fixtures_without_odds:
+                                    st.markdown("**Fixtures utan odds:**")
+                                    for item in import_status.fixtures_without_odds:
+                                        st.caption(f"- {item}")
+                                if import_status.fixtures_without_streck:
+                                    st.markdown("**Fixtures utan streck:**")
+                                    for item in import_status.fixtures_without_streck:
+                                        st.caption(f"- {item}")
+
+                        st.markdown("---")
+
+                        # -- Analys (ateranvand existerande rendering) --
+                        matches_with_odds = [
+                            m for m in matchday_matches if m.has_odds and m.odds_report
+                        ]
+
+                        if matches_with_odds:
+                            # --- Ranking: snabboversikt ---
+                            value_reports_list = [
+                                m.value_report for m in matches_with_odds
+                                if m.value_report is not None
+                            ]
+
+                            if value_reports_list:
+                                st.subheader("Snabboversikt — mest intressanta utfall")
+                                ranked_outcomes = rank_outcomes_by_edge(value_reports_list)
+
+                                positive_outcomes = [r for r in ranked_outcomes if r[2].edge > 0.001]
+                                negative_outcomes = [r for r in ranked_outcomes if r[2].edge < -0.001]
+
+                                if positive_outcomes:
+                                    st.markdown("**Hogst positiv edge:**")
+                                    pos_rows = []
+                                    for match_label, outcome_label, ov in positive_outcomes[:10]:
+                                        # Markera oddskalla
+                                        odds_source = "bild"
+                                        for m in matches_with_odds:
+                                            mkey = f"{m.home_team} vs {m.away_team}"
+                                            if mkey == match_label and m.match_key in fallback_keys:
+                                                odds_source = "fallback"
+                                                break
+                                        pos_rows.append({
+                                            "Match": match_label,
+                                            "Utfall": outcome_label,
+                                            "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                            "Edge": f"{ov.edge:+.1%}",
+                                            "Exp. return": f"{ov.expected_return:+.1%}",
+                                            "Oddskalla": odds_source,
+                                        })
+                                    st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
+
+                                if negative_outcomes:
+                                    st.markdown("**Mest negativa edge:**")
+                                    neg_rows = []
+                                    for match_label, outcome_label, ov in reversed(negative_outcomes[-5:]):
+                                        neg_rows.append({
+                                            "Match": match_label,
+                                            "Utfall": outcome_label,
+                                            "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                            "Edge": f"{ov.edge:+.1%}",
+                                            "Exp. return": f"{ov.expected_return:+.1%}",
+                                        })
+                                    st.dataframe(pd.DataFrame(neg_rows), use_container_width=True, hide_index=True)
+
+                                if not positive_outcomes and not negative_outcomes:
+                                    st.info("Ingen tydlig edge hittades bland aktuella matcher.")
+
+                            # --- Streckranking ---
+                            streck_reports_list = [
+                                m.streck_report for m in matches_with_odds
+                                if m.streck_report is not None
+                            ]
+                            if streck_reports_list:
+                                st.divider()
+                                st.subheader("Streckjamforelse — over- & understreckade")
+
+                                ranked_streck_outcomes = rank_outcomes_by_streck_delta(streck_reports_list)
+
+                                understreck = [r for r in ranked_streck_outcomes if r[2].delta < -0.001]
+                                if understreck:
+                                    st.markdown("**Mest understreckade utfall:**")
+                                    us_rows = []
+                                    for match_label, outcome_label, os_item in understreck[:10]:
+                                        us_rows.append({
+                                            "Match": match_label,
+                                            "Utfall": outcome_label,
+                                            "Fair prob": f"{os_item.fair_prob:.1%}",
+                                            "Streck": f"{os_item.streck_pct:.1%}",
+                                            "Delta": f"{os_item.delta:+.1%}",
+                                            "Bedomning": "understreckad",
+                                        })
+                                    st.dataframe(pd.DataFrame(us_rows), use_container_width=True, hide_index=True)
+
+                                overstreck = [r for r in reversed(ranked_streck_outcomes) if r[2].delta > 0.001]
+                                if overstreck:
+                                    st.markdown("**Mest overstreckade utfall:**")
+                                    os_rows = []
+                                    for match_label, outcome_label, os_item in overstreck[:10]:
+                                        os_rows.append({
+                                            "Match": match_label,
+                                            "Utfall": outcome_label,
+                                            "Fair prob": f"{os_item.fair_prob:.1%}",
+                                            "Streck": f"{os_item.streck_pct:.1%}",
+                                            "Delta": f"{os_item.delta:+.1%}",
+                                            "Bedomning": "overstreckad",
+                                        })
+                                    st.dataframe(pd.DataFrame(os_rows), use_container_width=True, hide_index=True)
+
+                            st.divider()
+
+                            # --- Detaljvy per match ---
+                            st.subheader("Detaljvy per match")
+
+                            for match in matchday_matches:
+                                if not match.odds_report:
+                                    with st.expander(
+                                        f"{match.home_team} vs {match.away_team}  |  Inga odds"
+                                    ):
+                                        st.caption("Ingen oddsdata tillganglig for denna match.")
+                                        if match.has_streck and match.streck:
+                                            st.markdown(
+                                                f"**Streck:** 1={match.streck['1']:.0f}% / "
+                                                f"X={match.streck['X']:.0f}% / "
+                                                f"2={match.streck['2']:.0f}%"
+                                            )
+                                    continue
+
+                                rpt = match.odds_report
+                                vr = match.value_report
+
+                                if vr is not None and vr.outcomes:
+                                    max_edge = max(ov.edge for ov in vr.outcomes)
+                                    edge_hint = f"  |  Hogsta edge: {max_edge:+.1%}" if abs(max_edge) > 0.001 else ""
+                                else:
+                                    edge_hint = ""
+
+                                # Oddskalla-markering
+                                if match.match_key in keys_with_odds:
+                                    src_tag = "bild"
+                                elif match.match_key in fallback_keys:
+                                    src_tag = "fallback"
+                                else:
+                                    src_tag = "okand"
+
+                                status_parts = []
+                                if match.has_odds:
+                                    status_parts.append(f"odds ({src_tag})")
+                                if match.has_streck:
+                                    status_parts.append("streck")
+                                status_tag = " + ".join(status_parts) if status_parts else "partiell"
+
+                                with st.expander(
+                                    f"{match.home_team} vs {match.away_team}  |  "
+                                    f"Overround: {rpt.overround:.1f}%{edge_hint}  [{status_tag}]"
+                                ):
+                                    # Bookmaker odds
+                                    bm_rows = []
+                                    for e in rpt.bookmaker_odds:
+                                        bm_rows.append({
+                                            "Bookmaker": e.bookmaker,
+                                            "1 (Hemma)": f"{e.home:.2f}",
+                                            "X (Oavgjort)": f"{e.draw:.2f}",
+                                            "2 (Borta)": f"{e.away:.2f}",
+                                        })
+                                    st.dataframe(pd.DataFrame(bm_rows), use_container_width=True, hide_index=True)
+
+                                    # Value
+                                    if vr is not None:
+                                        st.markdown("**Value-analys:**")
+                                        st.caption(f"Jamforelsekalla: {vr.comparison_source}")
+                                        value_rows = []
+                                        for ov in vr.outcomes:
+                                            label = {"1": "Hemma (1)", "X": "Oavgjort (X)", "2": "Borta (2)"}[ov.outcome]
+                                            value_rows.append({
+                                                "Utfall": label,
+                                                "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                                "Market fair prob": f"{ov.market_fair_prob:.1%}",
+                                                "Comparison prob": f"{ov.comparison_prob:.1%}",
+                                                "Edge": f"{ov.edge:+.1%}",
+                                                "Expected return": f"{ov.expected_return:+.1%}",
+                                                "Bedomning": ov.edge_label,
+                                            })
+                                        st.dataframe(pd.DataFrame(value_rows), use_container_width=True, hide_index=True)
+
+                                    # Streck
+                                    if match.streck_report is not None:
+                                        st.markdown("**Streckjamforelse:**")
+                                        streck_rows = []
+                                        for os_item in match.streck_report.outcomes:
+                                            olabel = {"1": "Hemma (1)", "X": "Oavgjort (X)", "2": "Borta (2)"}[os_item.outcome]
+                                            streck_rows.append({
+                                                "Utfall": olabel,
+                                                "Fair market prob": f"{os_item.fair_prob:.1%}",
+                                                "Streckprocent": f"{os_item.streck_pct:.1%}",
+                                                "Delta": f"{os_item.delta:+.1%}",
+                                                "Bedomning": os_item.label,
+                                            })
+                                        st.dataframe(pd.DataFrame(streck_rows), use_container_width=True, hide_index=True)
+                                    elif match.has_streck and match.streck:
+                                        st.markdown(
+                                            f"**Streck (ra):** 1={match.streck['1']:.0f}% / "
+                                            f"X={match.streck['X']:.0f}% / "
+                                            f"2={match.streck['2']:.0f}%"
+                                        )
+
+                            st.caption(
+                                "Value-analysen bygger pa marknadskonsensus mellan bookmakers. "
+                                "Streckjamforelsen visar skillnaden mellan folkets streck och "
+                                "marknadens fair probability. "
+                                "Oddskalla (bild/fallback) visas per match."
+                            )
+
+                        elif not matches_with_odds and matchday_matches:
+                            st.warning(
+                                "Inga matcher har giltiga odds. "
+                                "Ratta oddsen i kontrolltabellen ovan, "
+                                "eller lat appen anvanda fallback-odds."
+                            )
+                            st.markdown("**Laddade fixtures:**")
+                            for m in matchday_matches:
+                                streck_info = ""
+                                if m.has_streck and m.streck:
+                                    streck_info = (
+                                        f" — Streck: 1={m.streck['1']:.0f}% / "
+                                        f"X={m.streck['X']:.0f}% / "
+                                        f"2={m.streck['2']:.0f}%"
+                                    )
+                                st.caption(f"- {m.home_team} vs {m.away_team}{streck_info}")
+        else:
+            st.info(
+                "Ladda upp en kupongbild ovan for att borja. "
+                "Stodda format: PNG, JPG, JPEG, WEBP."
+            )
 
     elif odds_mode == "Manuell (skriv in odds)":
         st.subheader("1. Ange 1X2-odds")
