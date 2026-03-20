@@ -16,6 +16,9 @@ import pandas as pd
 
 from matchday_import import (
     parse_fixtures_csv,
+    parse_fixture_lines,
+    fetch_odds_for_fixtures,
+    ParseFixtureLinesResult,
     parse_odds_csv,
     parse_streck_csv,
     match_matchday_data,
@@ -552,3 +555,222 @@ class TestFallbackPaths:
         streck_pcts = {"1": 40, "X": 30, "2": 30}
         report = build_streck_report("Arsenal", "Liverpool", fair_probs, streck_pcts)
         assert report is not None
+
+
+# ---------------------------------------------------------------------------
+# parse_fixture_lines (text-paste parser)
+# ---------------------------------------------------------------------------
+
+class TestParseFixtureLines:
+    def test_hyphen_separator(self):
+        """Parser hanterar vanligt bindestreck."""
+        result = parse_fixture_lines("Leeds United - Brentford")
+        assert result.valid_count == 1
+        assert result.fixtures[0].home_team == "Leeds United"
+        assert result.fixtures[0].away_team == "Brentford"
+
+    def test_en_dash_separator(self):
+        """Parser hanterar tankstreck (en-dash)."""
+        result = parse_fixture_lines("Everton \u2013 Chelsea")
+        assert result.valid_count == 1
+        assert result.fixtures[0].home_team == "Everton"
+        assert result.fixtures[0].away_team == "Chelsea"
+
+    def test_em_dash_separator(self):
+        """Parser hanterar em-dash."""
+        result = parse_fixture_lines("Fulham \u2014 Burnley")
+        assert result.valid_count == 1
+        assert result.fixtures[0].home_team == "Fulham"
+        assert result.fixtures[0].away_team == "Burnley"
+
+    def test_vs_separator(self):
+        """Parser hanterar 'vs' separator."""
+        result = parse_fixture_lines("Arsenal vs Liverpool")
+        assert result.valid_count == 1
+        assert result.fixtures[0].home_team == "Arsenal"
+        assert result.fixtures[0].away_team == "Liverpool"
+
+    def test_vs_dot_separator(self):
+        """Parser hanterar 'vs.' separator."""
+        result = parse_fixture_lines("Arsenal vs. Liverpool")
+        assert result.valid_count == 1
+        assert result.fixtures[0].home_team == "Arsenal"
+        assert result.fixtures[0].away_team == "Liverpool"
+
+    def test_multiple_matches(self):
+        """Parser hanterar flera matcher."""
+        text = "Leeds United - Brentford\nEverton \u2013 Chelsea\nFulham vs Burnley"
+        result = parse_fixture_lines(text)
+        assert result.valid_count == 3
+        assert result.invalid_count == 0
+
+    def test_empty_lines_ignored(self):
+        """Tomma rader ska ignoreras."""
+        text = "Arsenal - Liverpool\n\n\nChelsea - Everton\n"
+        result = parse_fixture_lines(text)
+        assert result.valid_count == 2
+        assert result.blank_lines >= 2
+        assert result.invalid_count == 0
+
+    def test_invalid_lines_reported(self):
+        """Ogiltiga rader rapporteras."""
+        text = "Arsenal - Liverpool\nDetta ar ingen match\nChelsea - Everton"
+        result = parse_fixture_lines(text)
+        assert result.valid_count == 2
+        assert result.invalid_count == 1
+        assert "Detta ar ingen match" in result.invalid_lines
+
+    def test_whitespace_trimmed(self):
+        """Whitespace runt lagnamn trimmas."""
+        result = parse_fixture_lines("  Arsenal  -  Liverpool  ")
+        assert result.valid_count == 1
+        assert result.fixtures[0].home_team == "Arsenal"
+        assert result.fixtures[0].away_team == "Liverpool"
+
+    def test_empty_input(self):
+        """Tom input ger tomma resultat."""
+        result = parse_fixture_lines("")
+        assert result.valid_count == 0
+        assert result.invalid_count == 0
+
+    def test_match_key_built(self):
+        """match_key byggs korrekt fran lagnamn."""
+        result = parse_fixture_lines("Arsenal - Liverpool")
+        assert result.fixtures[0].match_key
+        assert "_" in result.fixtures[0].match_key
+
+    def test_result_is_parse_fixture_lines_result(self):
+        """Returnerar ParseFixtureLinesResult."""
+        result = parse_fixture_lines("Arsenal - Liverpool")
+        assert isinstance(result, ParseFixtureLinesResult)
+
+    def test_only_separator_line_invalid(self):
+        """Rad med bara separator ar ogiltig."""
+        result = parse_fixture_lines(" - ")
+        assert result.valid_count == 0
+        assert result.invalid_count == 1
+
+
+# ---------------------------------------------------------------------------
+# fetch_odds_for_fixtures
+# ---------------------------------------------------------------------------
+
+class TestFetchOddsForFixtures:
+    def test_no_data_dir_returns_all_unmatched(self, tmp_path):
+        """Utan data-mapp returneras alla som omatchade."""
+        fixtures = [MatchdayFixture("Arsenal", "Liverpool", "Arsenal_Liverpool")]
+        odds, matched, unmatched, labels = fetch_odds_for_fixtures(
+            fixtures, data_dir=tmp_path / "nonexistent",
+        )
+        assert matched == 0
+        assert unmatched == 1
+        assert len(labels) == 1
+
+    def test_empty_data_dir_returns_all_unmatched(self, tmp_path):
+        """Tom data-mapp returnerar alla som omatchade."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        fixtures = [MatchdayFixture("Arsenal", "Liverpool", "Arsenal_Liverpool")]
+        odds, matched, unmatched, labels = fetch_odds_for_fixtures(
+            fixtures, data_dir=data_dir,
+        )
+        assert matched == 0
+        assert unmatched == 1
+
+    def test_matches_from_csv(self, tmp_path):
+        """Odds matchas korrekt fran CSV-fil."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        csv_path = data_dir / "E0_2526.csv"
+        df = pd.DataFrame({
+            "HomeTeam": ["Arsenal", "Man City"],
+            "AwayTeam": ["Liverpool", "Chelsea"],
+            "B365H": [2.10, 1.50],
+            "B365D": [3.40, 4.50],
+            "B365A": [3.60, 6.50],
+        })
+        df.to_csv(csv_path, index=False)
+
+        fixtures = [
+            MatchdayFixture("Arsenal", "Liverpool", "Arsenal_Liverpool"),
+            MatchdayFixture("Man City", "Chelsea", "Man City_Chelsea"),
+        ]
+        odds, matched, unmatched, labels = fetch_odds_for_fixtures(
+            fixtures, data_dir=data_dir,
+        )
+        assert matched == 2
+        assert unmatched == 0
+        assert len(labels) == 0
+
+    def test_partial_match(self, tmp_path):
+        """Bara en del av fixtures hittas i CSV."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        csv_path = data_dir / "E0_2526.csv"
+        df = pd.DataFrame({
+            "HomeTeam": ["Arsenal"],
+            "AwayTeam": ["Liverpool"],
+            "B365H": [2.10],
+            "B365D": [3.40],
+            "B365A": [3.60],
+        })
+        df.to_csv(csv_path, index=False)
+
+        fixtures = [
+            MatchdayFixture("Arsenal", "Liverpool", "Arsenal_Liverpool"),
+            MatchdayFixture("Brighton", "Newcastle", "Brighton_Newcastle"),
+        ]
+        odds, matched, unmatched, labels = fetch_odds_for_fixtures(
+            fixtures, data_dir=data_dir,
+        )
+        assert matched == 1
+        assert unmatched == 1
+        assert "Brighton vs Newcastle" in labels[0]
+
+    def test_missing_odds_handled_defensively(self, tmp_path):
+        """CSV utan oddskolumner kraschar inte."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        csv_path = data_dir / "E0_2526.csv"
+        df = pd.DataFrame({
+            "HomeTeam": ["Arsenal"],
+            "AwayTeam": ["Liverpool"],
+        })
+        df.to_csv(csv_path, index=False)
+
+        fixtures = [MatchdayFixture("Arsenal", "Liverpool", "Arsenal_Liverpool")]
+        odds, matched, unmatched, labels = fetch_odds_for_fixtures(
+            fixtures, data_dir=data_dir,
+        )
+        assert matched == 0
+        assert unmatched == 1
+
+    def test_status_object_built_correctly(self, tmp_path):
+        """Status fran parse + fetch kan anvandas med match_matchday_data."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        csv_path = data_dir / "E0_2526.csv"
+        df = pd.DataFrame({
+            "HomeTeam": ["Arsenal"],
+            "AwayTeam": ["Liverpool"],
+            "B365H": [2.10],
+            "B365D": [3.40],
+            "B365A": [3.60],
+        })
+        df.to_csv(csv_path, index=False)
+
+        # Parse text -> fetch odds -> match
+        parse_result = parse_fixture_lines("Arsenal - Liverpool\nBrighton - Newcastle")
+        assert parse_result.valid_count == 2
+
+        odds_by_key, matched, unmatched, labels = fetch_odds_for_fixtures(
+            parse_result.fixtures, data_dir=data_dir,
+        )
+        assert matched == 1
+        assert unmatched == 1
+
+        # Feed into match_matchday_data
+        matches, status = match_matchday_data(parse_result.fixtures, odds_by_key, {})
+        assert status.fixtures_count == 2
+        assert status.odds_matched == 1
+        assert len(status.fixtures_without_odds) == 1
