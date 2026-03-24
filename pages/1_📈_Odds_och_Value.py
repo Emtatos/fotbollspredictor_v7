@@ -11,11 +11,27 @@ Stödjer fyra inmatningslägen:
 import streamlit as st
 import pandas as pd
 import logging
+from datetime import datetime
 from typing import Dict, List
 
 from app_helpers import get_model_and_data, ensure_model_ready
 
 logger = logging.getLogger(__name__)
+
+# --- Session state: current_round (5B) ---
+if "current_round" not in st.session_state:
+    st.session_state["current_round"] = None
+
+
+def _save_current_round(matches, odds, streck, source: str):
+    """Spara aktuell omgång i session state oavsett input-metod (5C)."""
+    st.session_state["current_round"] = {
+        "matches": matches,
+        "odds": odds,
+        "streck": streck,
+        "source": source,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 # Ladda modell och data via gemensam helper
 model, df_features, model_metadata, all_teams, MODEL_FILENAME = get_model_and_data()
@@ -322,6 +338,15 @@ if odds_mode == "Aktuell omgång (importera)":
                 fixtures_list, odds_by_key, streck_by_key,
             )
             st.session_state["matchday_data_source"] = "saved"
+
+            # Spara i current_round (enhetligt flöde, 5B/5C)
+            _save_current_round(
+                matches=[(f.home_team, f.away_team) for f in fixtures_list],
+                odds=odds_by_key,
+                streck=streck_by_key,
+                source="saved",
+            )
+
             _matchday_data_ready = True
 
     elif analyze_btn and match_text and match_text.strip():
@@ -397,6 +422,14 @@ if odds_mode == "Aktuell omgång (importera)":
                 st.session_state["matchday_data_source"] = "textpaste"
                 st.caption("Omgangsdata sparad automatiskt for ateranvandning.")
 
+            # Spara i current_round (enhetligt flöde, 5B/5C)
+            _save_current_round(
+                matches=[(f.home_team, f.away_team) for f in fixtures_list],
+                odds=odds_by_key,
+                streck=streck_by_key,
+                source="textpaste",
+            )
+
             _matchday_data_ready = True
 
     elif fixtures_file is not None or odds_file is not None:
@@ -462,6 +495,14 @@ if odds_mode == "Aktuell omgång (importera)":
             if save_matchday_data(fixtures_list, odds_by_key, streck_by_key):
                 st.session_state["matchday_data_source"] = "nyimporterad"
                 st.caption("Omgangsdata sparad automatiskt for ateranvandning.")
+
+            # Spara i current_round (enhetligt flöde, 5B/5C)
+            _save_current_round(
+                matches=[(f.home_team, f.away_team) for f in fixtures_list],
+                odds=odds_by_key,
+                streck=streck_by_key,
+                source="csv_import",
+            )
 
             _matchday_data_ready = True
 
@@ -969,6 +1010,14 @@ elif odds_mode == "Kupongbild (screenshot)":
                     # Spara data
                     save_matchday_data(fixtures, odds_by_key, streck_by_key)
                     st.session_state["matchday_data_source"] = "kupongbild"
+
+                    # Spara i current_round (enhetligt flöde, 5B/5C)
+                    _save_current_round(
+                        matches=[(f.home_team, f.away_team) for f in fixtures],
+                        odds=odds_by_key,
+                        streck=streck_by_key,
+                        source="kupongbild",
+                    )
 
                     # -- Importstatus --
                     st.markdown("---")

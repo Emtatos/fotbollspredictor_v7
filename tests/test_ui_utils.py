@@ -3,7 +3,7 @@ Enhetstester för ui_utils.py
 """
 import pytest
 import numpy as np
-from ui_utils import parse_match_input, pick_half_guards, get_halfguard_sign, calculate_match_entropy
+from ui_utils import parse_match_input, parse_match_input_with_errors, pick_half_guards, get_halfguard_sign, calculate_match_entropy
 from utils import set_canonical_teams
 
 
@@ -75,6 +75,95 @@ Liverpool - Manchester United"""
         result = parse_match_input(input_text)
         
         assert len(result) == 2
+
+
+class TestParseMatchInputNumberedLines:
+    """Tester för parse_match_input med radnumrerade rader (STEG 5A)"""
+
+    def setup_method(self):
+        teams = ["Arsenal", "Chelsea", "Liverpool", "Manchester United", "Tottenham Hotspur"]
+        set_canonical_teams(teams)
+
+    def test_numbered_dot_format(self):
+        """Testar 1. Arsenal - Chelsea"""
+        result = parse_match_input("1. Arsenal - Chelsea")
+        assert len(result) == 1
+        assert result[0] == ("Arsenal", "Chelsea")
+
+    def test_numbered_paren_format(self):
+        """Testar 1) Arsenal - Chelsea"""
+        result = parse_match_input("1) Arsenal - Chelsea")
+        assert len(result) == 1
+        assert result[0] == ("Arsenal", "Chelsea")
+
+    def test_numbered_colon_format(self):
+        """Testar 1: Arsenal - Chelsea"""
+        result = parse_match_input("1: Arsenal - Chelsea")
+        assert len(result) == 1
+        assert result[0] == ("Arsenal", "Chelsea")
+
+    def test_multi_digit_number(self):
+        """Testar 13. Arsenal - Chelsea"""
+        result = parse_match_input("13. Arsenal - Chelsea")
+        assert len(result) == 1
+        assert result[0] == ("Arsenal", "Chelsea")
+
+    def test_en_dash_separator(self):
+        """Testar en-dash: Arsenal – Chelsea"""
+        result = parse_match_input("Arsenal \u2013 Chelsea")
+        assert len(result) == 1
+        assert result[0] == ("Arsenal", "Chelsea")
+
+    def test_em_dash_separator(self):
+        """Testar em-dash: Arsenal — Chelsea"""
+        result = parse_match_input("Arsenal \u2014 Chelsea")
+        assert len(result) == 1
+        assert result[0] == ("Arsenal", "Chelsea")
+
+    def test_vs_dot_separator(self):
+        """Testar vs. med punkt"""
+        result = parse_match_input("Arsenal vs. Chelsea")
+        assert len(result) == 1
+        assert result[0] == ("Arsenal", "Chelsea")
+
+    def test_mixed_numbered_and_plain(self):
+        """Testar blandning av numrerade och vanliga rader"""
+        text = "1. Arsenal - Chelsea\nLiverpool - Manchester United\n3) Tottenham Hotspur - Arsenal"
+        result = parse_match_input(text)
+        assert len(result) == 3
+
+
+class TestParseMatchInputWithErrors:
+    """Tester för parse_match_input_with_errors (STEG 5A)"""
+
+    def setup_method(self):
+        teams = ["Arsenal", "Chelsea", "Liverpool", "Manchester United"]
+        set_canonical_teams(teams)
+
+    def test_returns_tuple(self):
+        """Testar att funktionen returnerar en tuple (matches, errors)"""
+        matches, errors = parse_match_input_with_errors("Arsenal - Chelsea")
+        assert isinstance(matches, list)
+        assert isinstance(errors, list)
+
+    def test_valid_input_no_errors(self):
+        """Inga felmeddelanden för korrekt input"""
+        matches, errors = parse_match_input_with_errors("Arsenal - Chelsea")
+        assert len(matches) == 1
+        assert len(errors) == 0
+
+    def test_invalid_line_produces_error(self):
+        """Ogiltiga rader ger felmeddelanden"""
+        matches, errors = parse_match_input_with_errors("Arsenal - Chelsea\nBadLine\nLiverpool - Manchester United")
+        assert len(matches) == 2
+        assert len(errors) == 1
+        assert "Rad 2" in errors[0]
+
+    def test_empty_input_no_errors(self):
+        """Tom input ger tomma listor"""
+        matches, errors = parse_match_input_with_errors("")
+        assert len(matches) == 0
+        assert len(errors) == 0
 
 
 class TestPickHalfGuards:

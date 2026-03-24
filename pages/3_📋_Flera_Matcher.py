@@ -18,6 +18,7 @@ from ui_utils import (
     get_halfguard_sign,
     pick_half_guards,
     parse_match_input,
+    parse_match_input_with_errors,
     calculate_match_entropy,
 )
 from utils import set_canonical_teams, get_canonical_teams
@@ -60,7 +61,13 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
             canon = set(df_features["HomeTeam"].dropna().astype(str)) | set(df_features["AwayTeam"].dropna().astype(str))
             set_canonical_teams(canon)
 
-        matches = parse_match_input(match_input)
+        matches, parse_errors = parse_match_input_with_errors(match_input)
+
+        # Visa eventuella tolkningsfel
+        if parse_errors:
+            with st.expander(f"⚠️ {len(parse_errors)} rad(er) kunde inte tolkas", expanded=True):
+                for err in parse_errors:
+                    st.warning(err)
 
         if not matches:
             st.error("❌ Kunde inte tolka några matcher. Kontrollera formatet.")
