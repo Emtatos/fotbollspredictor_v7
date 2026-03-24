@@ -96,7 +96,10 @@ def is_supported_image(filename: str) -> bool:
 
 _EXTRACTION_PROMPT = """Du ar en OCR-expert som tolkar svenska kupongbilder (tipsbilder).
 
-Bilden visar en kupong med fotbollsmatcher. For varje match, extrahera:
+Bilden visar en kupong med fotbollsmatcher. Kupongen kan vara fran
+Stryktipset (13 matcher), Europatipset (variabelt antal) eller liknande.
+
+For varje match, extrahera:
 - HomeTeam (hemmalag)
 - AwayTeam (bortalag)
 - Streck1 (streckprocent for 1/hemma, i procent t.ex. 45)
@@ -105,16 +108,15 @@ Bilden visar en kupong med fotbollsmatcher. For varje match, extrahera:
 - Odds1 (odds for 1/hemma, decimalodds t.ex. 2.10)
 - OddsX (odds for X/oavgjort)
 - Odds2 (odds for 2/borta)
-- confidence: "ok" om du ar saker, "uncertain" om nagot ar svarlast, "incomplete" om data saknas
+- confidence: "ok" om du ar saker, "uncertain" om text ar svarlast eller pixlad, "incomplete" om data saknas
 - notes: kort kommentar om nagot var svartolkat (annars tom strang)
 
 VIKTIGT:
-- Returnera ENDAST giltig JSON. Ingen text fore eller efter.
-- Returnera en JSON-array med objekt.
-- Streckvarden ska vara i procentform (t.ex. 45 for 45%).
+- Returnera ENBART en giltig JSON-array. Ingen markdown, inga code fences, ingen text fore eller efter.
+- Streckvarden ska vara i procentform (t.ex. 45 for 45%). Summan av Streck1+StreckX+Streck2 ska vara nara 100.
 - Odds ska vara decimalodds (t.ex. 2.10).
 - Om du inte kan lasa ett varde, satt det till null.
-- Gissa INTE aggressivt. Om du ar osakar, markera som "uncertain".
+- Gissa INTE aggressivt. Om text ar svarlast eller pixlad, satt confidence till "uncertain".
 - Om en hel rad ar olasbar, inkludera den med confidence "incomplete".
 - Lagnamn ska vara sa exakta som mojligt fran bilden.
 
@@ -204,33 +206,12 @@ def parse_coupon_image(
     b64_image = _encode_image_to_base64(image_bytes)
     mime_type = _detect_mime_type(filename)
 
-    # Anropa OpenAI Vision API
+    # Anropa OpenAI Vision API med retry-logik
+    max_retries = 2
+    last_error: Optional[Exception] = None
+
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": _EXTRACTION_PROMPT},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{b64_image}",
-                                "detail": "high",
-                            },
-                        },
-                    ],
-                }
-            ],
-            temperature=0.1,
-            max_tokens=4000,
-        )
-
-        raw_text = response.choices[0].message.content.strip()
     except ImportError:
         return CouponExtractionResult(
             rows=[],
@@ -240,8 +221,47 @@ def parse_coupon_image(
             incomplete_rows=0,
             error="OpenAI-paketet ar inte installerat. Kor: pip install openai",
         )
-    except Exception as e:
-        logger.error("OpenAI Vision API-anrop misslyckades: %s", e)
+
+    client = OpenAI(api_key=api_key)
+    raw_text = ""
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": _EXTRACTION_PROMPT},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{b64_image}",
+                                    "detail": "high",
+                                },
+                            },
+                        ],
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=4000,
+            )
+
+            raw_text = response.choices[0].message.content.strip()
+            last_error = None
+            break  # Lyckat anrop
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "OpenAI Vision API-anrop misslyckades (forsok %d/%d): %s",
+                attempt,
+                max_retries,
+                e,
+            )
+
+    if last_error is not None:
+        logger.error("OpenAI Vision API-anrop misslyckades efter %d forsok: %s", max_retries, last_error)
         return CouponExtractionResult(
             rows=[],
             total_rows=0,
@@ -249,7 +269,7 @@ def parse_coupon_image(
             uncertain_rows=0,
             incomplete_rows=0,
             raw_response="",
-            error=f"OpenAI API-fel: {e}",
+            error=f"OpenAI API-fel efter {max_retries} forsok: {last_error}",
         )
 
     # Parsa JSON fran svar
@@ -384,10 +404,28 @@ def _revalidate_confidence(row: CouponRow) -> CouponRow:
         # Fullt komplett — behall rapporterad confidence
         if row.confidence not in ("ok", "uncertain"):
             row.confidence = "ok"
+        # Validera att streck summerar till ~100% (±5%)
+        streck_sum = row.streck_1 + row.streck_x + row.streck_2
+        if abs(streck_sum - 100.0) > 5.0:
+            row.confidence = "uncertain"
+            row.notes = (
+                row.notes + "; " if row.notes else ""
+            ) + f"Streck summerar till {streck_sum:.1f}%, forvantade ~100%"
+            logger.warning(
+                "Streck for %s vs %s summerar till %.1f%% (forvantade ~100%%)",
+                row.home_team,
+                row.away_team,
+                streck_sum,
+            )
     elif not has_any_streck and not has_any_odds:
         row.confidence = "incomplete"
         if not row.notes:
             row.notes = "Varken streck eller odds kunde tolkas"
+        logger.info(
+            "Rad %s vs %s: varken streck eller odds kunde tolkas",
+            row.home_team,
+            row.away_team,
+        )
     elif not has_all_streck or not has_all_odds:
         if row.confidence == "ok":
             row.confidence = "uncertain"
@@ -398,6 +436,21 @@ def _revalidate_confidence(row: CouponRow) -> CouponRow:
             if not has_all_odds:
                 missing.append("odds")
             row.notes = f"Delvis saknade varden: {', '.join(missing)}"
+        logger.info(
+            "Rad %s vs %s: ofullstandig data (confidence=%s)",
+            row.home_team,
+            row.away_team,
+            row.confidence,
+        )
+
+    # Validera streck-summa aven nar odds saknas men streck finns
+    if has_all_streck and not has_all_odds:
+        streck_sum = row.streck_1 + row.streck_x + row.streck_2
+        if abs(streck_sum - 100.0) > 5.0:
+            row.confidence = "uncertain"
+            row.notes = (
+                row.notes + "; " if row.notes else ""
+            ) + f"Streck summerar till {streck_sum:.1f}%, forvantade ~100%"
 
     return row
 

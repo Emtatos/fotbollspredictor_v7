@@ -11,24 +11,35 @@ def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
     """
     Parar en text med flera rader av matcher (t.ex. "Arsenal - Chelsea")
     till en lista av normaliserade lagpar.
-    
+
     Stödjer format:
     - "Arsenal - Chelsea"
-    - "Arsenal-Chelsea" 
+    - "Arsenal-Chelsea"
     - "Arsenal vs Chelsea"
+    - "Arsenal vs. Chelsea"
     - "Arsenal mot Chelsea"
+    - "Arsenal – Chelsea"  (en-dash)
+    - "Arsenal — Chelsea"  (em-dash)
+    - "1. Arsenal - Chelsea"  (radnummer strippas)
+    - "13) Arsenal - Chelsea"
     """
     parsed_matches = []
+    errors: List[str] = []
     lines = text_input.strip().split('\n')
-    for line in lines:
+    for line_num, line in enumerate(lines, 1):
         line = line.strip()
         if not line:
             continue
-        
+
+        # Strippa radnummer (t.ex. "1. ", "13) ", "1: ")
+        line = re.sub(r'^\d+[.):\s]+\s*', '', line).strip()
+        if not line:
+            continue
+
         # Försök olika separatorer (mer flexibel regex)
-        # Matchar: " - ", "-", " vs ", " mot ", etc.
+        # Matchar: " - ", "-", " – ", " — ", " vs ", " vs. ", " mot ", etc.
         parts = re.split(r'\s*[-–—]\s*|\s+vs\.?\s+|\s+mot\s+', line, maxsplit=1, flags=re.IGNORECASE)
-        
+
         if len(parts) == 2:
             home_raw, away_raw = parts[0].strip(), parts[1].strip()
             if home_raw and away_raw:
@@ -36,8 +47,53 @@ def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
                 away_team = normalize_team_name(away_raw)
                 if home_team and away_team:
                     parsed_matches.append((home_team, away_team))
-    
+                else:
+                    errors.append(f"Rad {line_num}: kunde inte normalisera lagnamn i '{line}'")
+            else:
+                errors.append(f"Rad {line_num}: tomt lagnamn i '{line}'")
+        else:
+            errors.append(f"Rad {line_num}: kunde inte tolka '{line}' — förväntat format: 'Hemmalag - Bortalag'")
+
     return parsed_matches
+
+
+def parse_match_input_with_errors(text_input: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """
+    Samma som parse_match_input men returnerar även felmeddelanden.
+
+    Returnerar (matches, errors) där errors är en lista av strängar
+    som beskriver rader som inte kunde tolkas.
+    """
+    parsed_matches = []
+    errors: List[str] = []
+    lines = text_input.strip().split('\n')
+    for line_num, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Strippa radnummer (t.ex. "1. ", "13) ", "1: ")
+        line = re.sub(r'^\d+[.):\s]+\s*', '', line).strip()
+        if not line:
+            continue
+
+        parts = re.split(r'\s*[-–—]\s*|\s+vs\.?\s+|\s+mot\s+', line, maxsplit=1, flags=re.IGNORECASE)
+
+        if len(parts) == 2:
+            home_raw, away_raw = parts[0].strip(), parts[1].strip()
+            if home_raw and away_raw:
+                home_team = normalize_team_name(home_raw)
+                away_team = normalize_team_name(away_raw)
+                if home_team and away_team:
+                    parsed_matches.append((home_team, away_team))
+                else:
+                    errors.append(f"Rad {line_num}: kunde inte normalisera lagnamn i '{line}'")
+            else:
+                errors.append(f"Rad {line_num}: tomt lagnamn i '{line}'")
+        else:
+            errors.append(f"Rad {line_num}: kunde inte tolka '{line}' — förväntat format: 'Hemmalag - Bortalag'")
+
+    return parsed_matches, errors
 
 # --- NYTT: Logik för Halvgarderingar ---
 
