@@ -29,6 +29,40 @@ st.markdown(
     "Mata in odds → se fair probabilities → jämför value och streck → hitta intressanta utfall."
 )
 
+
+def _show_analysis_summary(value_reports_list, streck_reports_list, n_matches):
+    """Visa en sammanfattning med metrics innan detaljerna."""
+    from value_analysis import rank_outcomes_by_edge
+    from streck_analysis import rank_outcomes_by_streck_delta
+
+    top_value_match = "—"
+    top_overstreck = "—"
+
+    if value_reports_list:
+        ranked = rank_outcomes_by_edge(value_reports_list)
+        positive = [r for r in ranked if r[2].edge > 0.001]
+        if positive:
+            match_label, outcome_label, ov = positive[0]
+            top_value_match = f"{match_label}: {outcome_label} ({ov.edge:+.1%})"
+
+    if streck_reports_list:
+        ranked_streck = rank_outcomes_by_streck_delta(streck_reports_list)
+        overstreck = [r for r in reversed(ranked_streck) if r[2].delta > 0.001]
+        if overstreck:
+            match_label, outcome_label, os_item = overstreck[0]
+            top_overstreck = f"{match_label}: {outcome_label} ({os_item.delta:+.1%})"
+
+    st.subheader("Sammanfattning")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Matcher analyserade", n_matches)
+    with col2:
+        st.metric("Mest intressanta value", top_value_match)
+    with col3:
+        st.metric("Mest överstreckat utfall", top_overstreck)
+    st.divider()
+
+
 from odds_tool import (
     OddsEntry,
     build_match_report,
@@ -497,56 +531,59 @@ if odds_mode == "Aktuell omgång (importera)":
         matches_with_odds = [m for m in matchday_matches if m.has_odds and m.odds_report]
 
         if matches_with_odds:
-            # --- Ranking: snabboversikt ---
+            # Samla value- och streckrapporter
             value_reports_list = [
                 m.value_report for m in matches_with_odds
                 if m.value_report is not None
             ]
-
-            if value_reports_list:
-                from value_analysis import rank_outcomes_by_edge, rank_matches_by_interest
-                st.subheader("Snabboversikt — mest intressanta utfall")
-                ranked_outcomes = rank_outcomes_by_edge(value_reports_list)
-
-                positive_outcomes = [r for r in ranked_outcomes if r[2].edge > 0.001]
-                negative_outcomes = [r for r in ranked_outcomes if r[2].edge < -0.001]
-
-                if positive_outcomes:
-                    st.markdown("**Hogst positiv edge:**")
-                    pos_rows = []
-                    for match_label, outcome_label, ov in positive_outcomes[:10]:
-                        pos_rows.append({
-                            "Match": match_label,
-                            "Utfall": outcome_label,
-                            "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
-                            "Edge": f"{ov.edge:+.1%}",
-                            "Exp. return": f"{ov.expected_return:+.1%}",
-                            "Bedomning": ov.edge_label,
-                        })
-                    st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
-
-                if negative_outcomes:
-                    st.markdown("**Mest negativa edge:**")
-                    neg_rows = []
-                    for match_label, outcome_label, ov in reversed(negative_outcomes[-5:]):
-                        neg_rows.append({
-                            "Match": match_label,
-                            "Utfall": outcome_label,
-                            "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
-                            "Edge": f"{ov.edge:+.1%}",
-                            "Exp. return": f"{ov.expected_return:+.1%}",
-                            "Bedomning": ov.edge_label,
-                        })
-                    st.dataframe(pd.DataFrame(neg_rows), use_container_width=True, hide_index=True)
-
-                if not positive_outcomes and not negative_outcomes:
-                    st.info("Ingen tydlig edge hittades bland aktuella matcher.")
-
-            # --- Streckranking ---
             streck_reports_list = [
                 m.streck_report for m in matches_with_odds
                 if m.streck_report is not None
             ]
+
+            # --- Sammanfattning ---
+            _show_analysis_summary(value_reports_list, streck_reports_list, len(matches_with_odds))
+
+            # --- Ranking: snabboversikt ---
+            if value_reports_list:
+                from value_analysis import rank_outcomes_by_edge, rank_matches_by_interest
+                with st.expander("Fullständig analys", expanded=True):
+                    st.subheader("Snabboversikt — mest intressanta utfall")
+                    ranked_outcomes = rank_outcomes_by_edge(value_reports_list)
+
+                    positive_outcomes = [r for r in ranked_outcomes if r[2].edge > 0.001]
+                    negative_outcomes = [r for r in ranked_outcomes if r[2].edge < -0.001]
+
+                    if positive_outcomes:
+                        st.markdown("**Hogst positiv edge:**")
+                        pos_rows = []
+                        for match_label, outcome_label, ov in positive_outcomes[:10]:
+                            pos_rows.append({
+                                "Match": match_label,
+                                "Utfall": outcome_label,
+                                "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                "Edge": f"{ov.edge:+.1%}",
+                                "Exp. return": f"{ov.expected_return:+.1%}",
+                                "Bedomning": ov.edge_label,
+                            })
+                        st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
+
+                    if negative_outcomes:
+                        st.markdown("**Mest negativa edge:**")
+                        neg_rows = []
+                        for match_label, outcome_label, ov in reversed(negative_outcomes[-5:]):
+                            neg_rows.append({
+                                "Match": match_label,
+                                "Utfall": outcome_label,
+                                "Odds": f"{ov.odds:.2f} ({ov.bookmaker})",
+                                "Edge": f"{ov.edge:+.1%}",
+                                "Exp. return": f"{ov.expected_return:+.1%}",
+                                "Bedomning": ov.edge_label,
+                            })
+                        st.dataframe(pd.DataFrame(neg_rows), use_container_width=True, hide_index=True)
+
+                    if not positive_outcomes and not negative_outcomes:
+                        st.info("Ingen tydlig edge hittades bland aktuella matcher.")
             if streck_reports_list:
                 from streck_analysis import (
                     rank_outcomes_by_streck_delta,
@@ -971,12 +1008,20 @@ elif odds_mode == "Kupongbild (screenshot)":
                     ]
 
                     if matches_with_odds:
-                        # --- Ranking: snabboversikt ---
+                        # Samla rapporter for sammanfattning
                         value_reports_list = [
                             m.value_report for m in matches_with_odds
                             if m.value_report is not None
                         ]
+                        streck_reports_list_coupon = [
+                            m.streck_report for m in matches_with_odds
+                            if m.streck_report is not None
+                        ]
 
+                        # --- Sammanfattning ---
+                        _show_analysis_summary(value_reports_list, streck_reports_list_coupon, len(matches_with_odds))
+
+                        # --- Ranking: snabboversikt ---
                         if value_reports_list:
                             st.subheader("Snabboversikt — mest intressanta utfall")
                             ranked_outcomes = rank_outcomes_by_edge(value_reports_list)
@@ -1470,6 +1515,25 @@ else:
                     vr = build_value_report(rpt)
                     if vr is not None:
                         value_reports.append((rpt, vr))
+
+                # Samla streck-rapporter for sammanfattning
+                streck_reports_for_summary = []
+                if streck_lookup:
+                    for rpt in reports:
+                        skey = f"{rpt.home_team}_{rpt.away_team}"
+                        if skey in streck_lookup:
+                            sr = build_streck_report_from_odds_report(
+                                rpt, streck_lookup[skey],
+                            )
+                            if sr is not None:
+                                streck_reports_for_summary.append(sr)
+
+                # --- Sammanfattning ---
+                _show_analysis_summary(
+                    [vr for _, vr in value_reports] if value_reports else [],
+                    streck_reports_for_summary,
+                    len(reports),
+                )
 
                 # Rangordna matcher efter intresse (hogst edge forst)
                 if value_reports:

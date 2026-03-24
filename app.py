@@ -80,21 +80,26 @@ st.markdown("Analysera odds, fair probabilities, value och streckjämförelse f�
 # ============================================================================
 
 with st.sidebar:
-    st.header("📊 Status")
+    st.header("⚽ Fotbollspredictor")
 
-    if model:
-        st.success(f"✅ Modell laddad: `{MODEL_FILENAME}`")
+    # Kort, tydlig status
+    if model is not None:
+        st.success("Modell laddad")
     else:
-        st.warning("⚠️ Ingen modell laddad")
+        st.warning("Ingen modell — kör pipeline först")
 
     if df_features is not None:
-        st.success(f"✅ Data laddad: {len(df_features)} matcher")
-        st.info(f"📋 {len(all_teams)} lag tillgängliga")
-    else:
-        st.warning("⚠️ Ingen data laddad")
+        st.caption(f"{len(df_features)} matcher · {len(all_teams)} lag")
 
-    if model_metadata:
-        with st.expander("📋 Model Card"):
+    # Detaljerad teknisk status under expander
+    with st.expander("Teknisk status", expanded=False):
+        if df_features is not None:
+            st.write(f"Matcher i data: {len(df_features)}")
+            st.write(f"Antal lag: {len(all_teams)}")
+        else:
+            st.write("Ingen feature-data laddad")
+
+        if model_metadata:
             st.markdown(f"**Version:** {model_metadata.get('model_version', 'N/A')}")
             st.markdown(f"**Tränad:** {model_metadata.get('train_date', 'N/A')[:10]}")
             cov = model_metadata.get("dataset_coverage", {})
@@ -116,72 +121,70 @@ with st.sidebar:
             if splits:
                 st.markdown(f"**Split:** train={splits.get('train',0)}, cal={splits.get('calibrate',0)}, test={splits.get('test',0)}")
 
-    # OpenAI-status
-    if HAS_OPENAI and (os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)):
-        st.success("✅ AI-analys tillgänglig")
-    else:
-        st.info("ℹ️ AI-analys ej tillgänglig")
-
-    # Skade-data status
-    if HAS_INJURY_SCRAPER:
-        injury_file = Path("data/injuries_latest.json")
-        if injury_file.exists():
-            fetcher = InjuryDataFetcher()
-            if fetcher.is_data_stale():
-                st.warning("⚠️ Skadedata är gammal (>24h)")
-            else:
-                import json
-                with open(injury_file, "r") as f:
-                    data = json.load(f)
-                    last_update = data.get("last_updated", "Okänd")
-                    if last_update != "Okänd":
-                        last_update = datetime.fromisoformat(last_update).strftime("%Y-%m-%d %H:%M")
-                st.success(f"✅ Skadedata uppdaterad: {last_update}")
+        # OpenAI-status
+        if HAS_OPENAI and (os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)):
+            st.write("AI-analys: tillgänglig")
         else:
-            st.info("ℹ️ Skadedata saknas - klicka 'Uppdatera skador'")
+            st.write("AI-analys: ej tillgänglig")
 
-    st.divider()
+        # Skade-data status
+        if HAS_INJURY_SCRAPER:
+            injury_file = Path("data/injuries_latest.json")
+            if injury_file.exists():
+                fetcher = InjuryDataFetcher()
+                if fetcher.is_data_stale():
+                    st.write("Skadedata: gammal (>24h)")
+                else:
+                    import json
+                    with open(injury_file, "r") as f:
+                        inj_data = json.load(f)
+                        last_update = inj_data.get("last_updated", "Okänd")
+                        if last_update != "Okänd":
+                            last_update = datetime.fromisoformat(last_update).strftime("%Y-%m-%d %H:%M")
+                    st.write(f"Skadedata: {last_update}")
+            else:
+                st.write("Skadedata: saknas")
 
-    st.header("🔧 Åtgärder")
+        st.divider()
 
-    # Knapp för att uppdatera skadedata
-    if HAS_INJURY_SCRAPER:
-        if st.button("🎪 Uppdatera skador & form", help="Hämtar senaste skador och matchresultat", use_container_width=True):
-            with st.spinner("🔄 Hämtar färsk data..."):
+        # Pipeline-knappar under teknisk status
+        if HAS_INJURY_SCRAPER:
+            if st.button("Uppdatera skador & form", help="Hämtar senaste skador och matchresultat", use_container_width=True):
+                with st.spinner("Hämtar färsk data..."):
+                    try:
+                        success = update_injury_data()
+                        if success:
+                            st.success("Skadedata uppdaterad!")
+                            st.rerun()
+                        else:
+                            st.error("Kunde inte uppdatera skadedata. Kontrollera API-nyckel.")
+                    except Exception as e:
+                        st.error(f"Fel vid uppdatering: {e}")
+                        logger.error(f"Injury update failed: {e}", exc_info=True)
+
+        if st.button("Kör omträning av modell", help="Tränar om modellen med alla 27 features (inkl. skador)", use_container_width=True):
+            with st.spinner("Tränar modell med 27 features..."):
                 try:
-                    success = update_injury_data()
-                    if success:
-                        st.success("✅ Skadedata uppdaterad!")
-                        st.rerun()
-                    else:
-                        st.error("❌ Kunde inte uppdatera skadedata. Kontrollera API-nyckel.")
-                except Exception as e:
-                    st.error(f"❌ Fel vid uppdatering: {e}")
-                    logger.error(f"Injury update failed: {e}", exc_info=True)
-
-    if st.button("🔄 Kör omträning av modell", help="Tränar om modellen med alla 27 features (inkl. skador)", use_container_width=True):
-        with st.spinner("🔄 Tränar modell med 27 features..."):
-            try:
-                from retrain_model_27features import retrain_with_injury_features
-                new_model_path = retrain_with_injury_features()
-                st.success(f"✅ Modell omtränad med 27 features!")
-                st.info(f"💾 Sparad som: {new_model_path.name}")
-                st.cache_resource.clear()
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ Ett fel inträffade: {e}")
-                logger.error(f"Retrain failed: {e}", exc_info=True)
-                try:
-                    st.info("🔄 Försöker med full pipeline...")
-                    run_pipeline()
-                    st.success("✅ Pipelinen är färdig!")
+                    from retrain_model_27features import retrain_with_injury_features
+                    new_model_path = retrain_with_injury_features()
+                    st.success(f"Modell omtränad med 27 features!")
+                    st.info(f"Sparad som: {new_model_path.name}")
                     st.cache_resource.clear()
                     st.cache_data.clear()
                     st.rerun()
-                except Exception as e2:
-                    st.error(f"❌ Pipeline misslyckades också: {e2}")
-                    logger.error(f"Pipeline fallback failed: {e2}", exc_info=True)
+                except Exception as e:
+                    st.error(f"Ett fel inträffade: {e}")
+                    logger.error(f"Retrain failed: {e}", exc_info=True)
+                    try:
+                        st.info("Försöker med full pipeline...")
+                        run_pipeline()
+                        st.success("Pipelinen är färdig!")
+                        st.cache_resource.clear()
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e2:
+                        st.error(f"Pipeline misslyckades också: {e2}")
+                        logger.error(f"Pipeline fallback failed: {e2}", exc_info=True)
 
 # ============================================================================
 # AUTO-TRÄNING OM MODELL/DATA SAKNAS
