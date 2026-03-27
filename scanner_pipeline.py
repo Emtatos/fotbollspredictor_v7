@@ -383,6 +383,15 @@ def _validate_odds_triplet(
         issues.append("Odds innehaller noll")
         return 0.2
 
+    # Rimlighetskontroll: enskilda odds bor vara inom normalt intervall
+    for label, val in [("Odds1", odds_1), ("OddsX", odds_x), ("Odds2", odds_2)]:
+        if val > 100.0:
+            issues.append(f"{label}={val:.2f} ar orimligt hogt")
+            return 0.2
+        elif val > 50.0:
+            issues.append(f"{label}={val:.2f} ar ovanligt hogt")
+            return 0.5
+
     # Overround bor vara ~1.0-1.3 (0-30% marginal)
     if 0.9 <= implied_sum <= 1.4:
         return 1.0
@@ -392,14 +401,6 @@ def _validate_odds_triplet(
     else:
         issues.append(f"Overround {implied_sum:.2f} ar orimligt")
         return 0.3
-
-    # Rimlighetskontroll: alla odds bor vara inom normalt intervall
-    for label, val in [("Odds1", odds_1), ("OddsX", odds_x), ("Odds2", odds_2)]:
-        if val > 50.0:
-            issues.append(f"{label}={val:.2f} ar ovanligt hogt")
-            return 0.5
-
-    return 1.0
 
 
 def _check_streck_odds_confusion(row: ScannedRow) -> None:
@@ -527,7 +528,8 @@ SCANNER_TEAM_ALIASES: Dict[str, str] = {
     "Leeds": "Leeds United",
     "Ipswich": "Ipswich Town",
     "Rotherham": "Rotherham United",
-    "Peterborough": "Peterboro",
+    "Peterborough": "Peterborough United",
+    "Peterboro": "Peterborough United",
     "Cambridge": "Cambridge United",
     "Cambridge Utd": "Cambridge United",
     # Vanliga OCR-missuppfattningar med specialtecken

@@ -965,14 +965,7 @@ elif odds_mode == "Kupongbild (screenshot)":
                 if all_teams:
                     _scanner_canonical = set(all_teams)
 
-                result = parse_coupon_image(
-                    image_bytes,
-                    coupon_file.name,
-                    canonical_teams=_scanner_canonical,
-                    use_pipeline=True,
-                )
-
-                # Kor aven den fullstandiga pipelinen for detaljerad info
+                # Kor pipelinen en gang och ateranvand resultatet
                 try:
                     scanner_result = run_scanner_pipeline(
                         image_bytes,
@@ -981,7 +974,21 @@ elif odds_mode == "Kupongbild (screenshot)":
                     )
                     st.session_state["coupon_scanner_details"] = scanner_result
                 except Exception:
+                    scanner_result = None
                     st.session_state["coupon_scanner_details"] = None
+
+                # Konvertera till CouponExtractionResult for bakatkompabilitet
+                if scanner_result is not None:
+                    from scanner_pipeline import scanner_result_to_extraction_result
+                    result = scanner_result_to_extraction_result(scanner_result)
+                else:
+                    # Fallback till legacy-parsning om pipelinen misslyckades
+                    result = parse_coupon_image(
+                        image_bytes,
+                        coupon_file.name,
+                        canonical_teams=_scanner_canonical,
+                        use_pipeline=False,
+                    )
 
             if result.error:
                 st.error(f"Tolkningsfel: {result.error}")
