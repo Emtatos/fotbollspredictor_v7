@@ -37,6 +37,35 @@ st.header("Flera matcher — modellprediktion")
 st.caption("Använder den tränade modellen. Se Odds & Value-fliken för oddsanalys.")
 st.markdown("Skriv in matcher, en per rad. Format: `Hemmalag - Bortalag`")
 
+# --- Importera från senaste scanning (current_round) ---
+current_round = st.session_state.get("current_round")
+if current_round and current_round.get("matches"):
+    source_label = current_round.get("source", "okänd källa")
+    timestamp = current_round.get("timestamp", "")
+    ts_short = timestamp[:16].replace("T", " ") if timestamp else ""
+    num_matches = len(current_round["matches"])
+
+    with st.container():
+        imp_col1, imp_col2 = st.columns([3, 1])
+        with imp_col1:
+            st.info(
+                f"ℹ️ {num_matches} matcher tillgängliga från senaste import "
+                f"({source_label}{', ' + ts_short if ts_short else ''}). "
+                f"Klicka för att fylla i automatiskt."
+            )
+        with imp_col2:
+            if st.button(
+                "Importera matcher",
+                key="btn_import_from_round",
+                use_container_width=True,
+            ):
+                lines = [
+                    f"{home} - {away}"
+                    for home, away in current_round["matches"]
+                ]
+                st.session_state["multi_matches"] = "\n".join(lines)
+                st.rerun()
+
 match_input = st.text_area(
     "Matcher:",
     height=200,
