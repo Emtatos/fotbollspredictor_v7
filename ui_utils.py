@@ -6,6 +6,7 @@ import numpy as np
 # Importeras från utils.py, som vi vet fungerar
 from utils import normalize_team_name
 from uncertainty import entropy_norm
+from combined_probability import CombinedMatchProbability
 
 def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
     """
@@ -154,3 +155,56 @@ def get_halfguard_sign(probs: np.ndarray) -> str:
     
     # Bygg en sträng med de två återstående tecknen
     return "".join([signs[i] for i in range(3) if i != least_likely_index])
+
+
+# --- Kombinerade halvgarderingar (odds + modell + streck) ---
+
+def pick_half_guards_combined(
+    combined_matches: List[CombinedMatchProbability],
+    n_guards: int,
+) -> List[int]:
+    """
+    Väljer halvgarderingar baserat på kombinerad entropy
+    från odds + modell + streck.
+
+    Strategi:
+    1. Sortera på kombinerad entropy (högst = mest osäker)
+    2. Vid lika entropy, prioritera matcher med högt streck-delta
+       (överstreckat utfall = folket har fel → extra osäkert)
+
+    Returnerar lista med index.
+    """
+    if n_guards <= 0:
+        return []
+
+    scored = []
+    for i, cm in enumerate(combined_matches):
+        # Primär: entropy från kombinerad sannolikhet
+        # Sekundär: max streck-delta (överstreckat = extra osäkerhet)
+        max_streck_delta = max(
+            abs(cm.streck_delta_1),
+            abs(cm.streck_delta_x),
+            abs(cm.streck_delta_2),
+        )
+        scored.append({
+            "index": i,
+            "entropy": cm.entropy,
+            "streck_delta": max_streck_delta,
+        })
+
+    # Sortera: högst entropy först, vid lika → högst streck-delta
+    scored.sort(key=lambda x: (x["entropy"], x["streck_delta"]), reverse=True)
+    return [s["index"] for s in scored[:n_guards]]
+
+
+def get_halfguard_sign_combined(cm: CombinedMatchProbability) -> str:
+    """
+    Väljer halvgarderingstecken baserat på kombinerad sannolikhet.
+
+    Tar bort det minst sannolika utfallet enligt den kombinerade
+    sannolikheten (inte bara modellen).
+    """
+    signs = ["1", "X", "2"]
+    probs = cm.probs
+    least_likely = int(np.argmin(probs))
+    return "".join(signs[i] for i in range(3) if i != least_likely)
