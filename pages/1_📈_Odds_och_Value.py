@@ -204,7 +204,7 @@ if odds_mode == "Aktuell omgång (importera)":
         st.caption("Ingen sparad omgang.")
 
     # ----- Ladda sparad data om anvandaren valde det -----
-    _use_saved_data = st.session_state.get("matchday_data_source") == "saved"
+    _use_saved_data = st.session_state.get("matchday_data_source") is not None
     _saved_loaded = False
     _saved_fixtures: list = []
     _saved_odds: Dict = {}
@@ -339,14 +339,15 @@ if odds_mode == "Aktuell omgång (importera)":
             matchday_matches, import_status = match_matchday_data(
                 fixtures_list, odds_by_key, streck_by_key,
             )
-            st.session_state["matchday_data_source"] = "saved"
+            if not st.session_state.get("matchday_data_source"):
+                st.session_state["matchday_data_source"] = "saved"
 
             # Spara i current_round (enhetligt flöde, 5B/5C)
             _save_current_round(
                 matches=[(f.home_team, f.away_team) for f in fixtures_list],
                 odds=odds_by_key,
                 streck=streck_by_key,
-                source="saved",
+                source=st.session_state.get("matchday_data_source", "saved"),
             )
 
             _matchday_data_ready = True
@@ -1182,6 +1183,9 @@ elif odds_mode == "Kupongbild (screenshot)":
                     save_matchday_data(fixtures, odds_by_key, streck_by_key)
                     st.session_state["matchday_data_source"] = "kupongbild"
 
+                    # Spara matchday_matches for persistent half-guard rendering
+                    st.session_state["coupon_matchday_matches"] = matchday_matches
+
                     # Spara i current_round (enhetligt flöde, 5B/5C)
                     _save_current_round(
                         matches=[(f.home_team, f.away_team) for f in fixtures],
@@ -1521,6 +1525,82 @@ elif odds_mode == "Kupongbild (screenshot)":
                                     f"2={m.streck['2']:.0f}%"
                                 )
                             st.caption(f"- {m.home_team} vs {m.away_team}{streck_info}")
+
+            # --- Persistent half-guard rendering from session_state ---
+            # When the user changes the num_hg widget, confirm_btn is False
+            # on rerender.  Re-derive combined matches from the stored
+            # matchday_matches so the half-guard section stays interactive.
+            _ca_matches = st.session_state.get("coupon_matchday_matches")
+            if _ca_matches is not None and not confirm_btn:
+                _ca_with_odds = [
+                    m for m in _ca_matches if m.has_odds and m.odds_report
+                ]
+                if _ca_with_odds:
+                    st.divider()
+
+                    _ca_combined = []
+                    for _m in _ca_matches:
+                        _o1 = _ox = _o2 = None
+                        if _m.odds_report and _m.odds_report.bookmaker_odds:
+                            _bm = _m.odds_report.bookmaker_odds[0]
+                            _o1, _ox, _o2 = _bm.home, _bm.draw, _bm.away
+                        _s1 = _sx = _s2 = None
+                        if _m.has_streck and _m.streck:
+                            _s1 = _m.streck.get("1")
+                            _sx = _m.streck.get("X")
+                            _s2 = _m.streck.get("2")
+                        _ca_combined.append(build_combined_match(
+                            home_team=_m.home_team, away_team=_m.away_team,
+                            odds_1=_o1, odds_x=_ox, odds_2=_o2,
+                            streck_1=_s1, streck_x=_sx, streck_2=_s2,
+                        ))
+
+                    num_hg = st.number_input(
+                        "Antal halvgarderingar:",
+                        min_value=0,
+                        max_value=len(_ca_matches),
+                        value=min(3, len(_ca_matches)),
+                        key="coupon_num_halfguards",
+                    )
+
+                    if num_hg > 0 and _ca_combined:
+                        _guard_idx = pick_half_guards_combined(_ca_combined, num_hg)
+                        st.subheader("Halvgarderingar (kombinerad analys)")
+                        _hg_rows = []
+                        for _idx in _guard_idx:
+                            _cm = _ca_combined[_idx]
+                            _sign = get_halfguard_sign_combined(_cm)
+                            _hg_rows.append({
+                                "Match": f"{_cm.home_team} vs {_cm.away_team}",
+                                "Tips": _sign,
+                                "Gain": f"{sorted(_cm.probs, reverse=True)[1]:.3f}",
+                                "1": f"{_cm.prob_1:.1%}",
+                                "X": f"{_cm.prob_x:.1%}",
+                                "2": f"{_cm.prob_2:.1%}",
+                            })
+                        st.dataframe(
+                            pd.DataFrame(_hg_rows),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        _src = []
+                        if any(c.sources["odds"] for c in _ca_combined):
+                            _src.append("odds (50%)")
+                        if any(c.sources["model"] for c in _ca_combined):
+                            _src.append("modell (35%)")
+                        if any(c.sources["streck"] for c in _ca_combined):
+                            _src.append("streck (15%)")
+                        if _src:
+                            st.caption(
+                                f"Halvgarderingar baserade på: {', '.join(_src)}"
+                            )
+                        st.caption(
+                            "Urval av halvgarderingar styrs av **gain** "
+                            "(näst högsta sannolikheten = marginalnytta "
+                            "av en halvgardering)."
+                        )
+
     else:
         st.info(
             "Ladda upp en kupongbild ovan for att borja. "
