@@ -293,10 +293,22 @@ def print_comparison(results: dict) -> str:
     hg_delta = acc_hg_g - acc_hg_e
     comb_delta = comb_g - comb_e
 
-    if hg_delta > 0.01 and comb_delta > 0.005:
-        verdict = "**Gain-based selection is better** than entropy-based on this dataset."
-    elif hg_delta < -0.01 and comb_delta < -0.005:
-        verdict = "**Entropy-based selection is better** than gain-based on this dataset."
+    if hg_delta > 0.01:
+        verdict = (
+            "**Gain-based selection is better** for half-guard accuracy "
+            f"(Acc_Top2_HG: {acc_hg_g:.4f} vs {acc_hg_e:.4f}, delta {hg_delta:+.4f})."
+        )
+        if abs(comb_delta) < 0.005:
+            verdict += (
+                f" The combined ticket hit rate difference is small ({comb_delta:+.4f}) "
+                f"because N_HALF={N_HALF} is a small fraction of total matches, "
+                "but the gain-based method picks half-guards that are much more likely to hit."
+            )
+    elif hg_delta < -0.01:
+        verdict = (
+            "**Entropy-based selection is better** for half-guard accuracy "
+            f"(Acc_Top2_HG: {acc_hg_e:.4f} vs {acc_hg_g:.4f}, delta {hg_delta:+.4f})."
+        )
     else:
         verdict = "**Mixed / no clear winner** -- the two methods perform similarly on this dataset."
 
