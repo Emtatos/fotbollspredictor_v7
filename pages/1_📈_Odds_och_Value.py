@@ -906,7 +906,7 @@ if odds_mode == "Aktuell omgång (importera)":
 
 elif odds_mode == "Kupongbild (screenshot)":
     # ==================================================================
-    # KUPONGBILD-FLODE: bild -> tolkning -> kontrolltabell -> analys
+    # KUPONGBILD-FLODE: bild -> pipeline -> kontrolltabell -> analys
     # ==================================================================
     from coupon_image_parser import (
         parse_coupon_image,
@@ -916,6 +916,7 @@ elif odds_mode == "Kupongbild (screenshot)":
         is_supported_image,
         CouponRow,
     )
+    from scanner_pipeline import run_scanner_pipeline, ScannedRow, ScannerResult
     from matchday_import import (
         match_matchday_data,
         fetch_odds_for_fixtures,
@@ -925,9 +926,9 @@ elif odds_mode == "Kupongbild (screenshot)":
 
     st.subheader("Kupongbild — ladda upp skarmbilden")
     st.markdown(
-        "Ladda upp en skärmbild av kupongen. Appen extraherar matcher, "
-        "streckprocent och odds. Du granskar och rättar i en kontrolltabell "
-        "innan analysen körs."
+        "Ladda upp en skärmbild av kupongen. Appen kör en **förbättrad scanningpipeline** "
+        "med bildförbehandling, radvis extraktion, lagmatchning och validering. "
+        "Du granskar och rättar i en kontrolltabell innan analysen körs."
     )
 
     # -- Bilduppladdning --
@@ -946,6 +947,7 @@ elif odds_mode == "Kupongbild (screenshot)":
         if "coupon_extraction_df" not in st.session_state:
             st.session_state["coupon_extraction_df"] = None
             st.session_state["coupon_extraction_status"] = None
+            st.session_state["coupon_scanner_details"] = None
 
         extract_btn = st.button(
             "Extrahera matcher, streck & odds",
@@ -955,9 +957,31 @@ elif odds_mode == "Kupongbild (screenshot)":
         )
 
         if extract_btn:
-            with st.spinner("Tolkar kupongbilden med AI..."):
+            with st.spinner("Kor forbattrad scannerpipeline (forbehandling → AI → validering → lagmapping)..."):
                 image_bytes = coupon_file.getvalue()
-                result = parse_coupon_image(image_bytes, coupon_file.name)
+
+                # Hamta kanoniska lag fran laddad data om tillganglig
+                _scanner_canonical = set()
+                if all_teams:
+                    _scanner_canonical = set(all_teams)
+
+                result = parse_coupon_image(
+                    image_bytes,
+                    coupon_file.name,
+                    canonical_teams=_scanner_canonical,
+                    use_pipeline=True,
+                )
+
+                # Kor aven den fullstandiga pipelinen for detaljerad info
+                try:
+                    scanner_result = run_scanner_pipeline(
+                        image_bytes,
+                        coupon_file.name,
+                        canonical_teams=_scanner_canonical,
+                    )
+                    st.session_state["coupon_scanner_details"] = scanner_result
+                except Exception:
+                    st.session_state["coupon_scanner_details"] = None
 
             if result.error:
                 st.error(f"Tolkningsfel: {result.error}")
@@ -979,6 +1003,37 @@ elif odds_mode == "Kupongbild (screenshot)":
         # -- Visa kontrolltabell om extraktion ar klar --
         if st.session_state.get("coupon_extraction_df") is not None:
             ext_status = st.session_state.get("coupon_extraction_status", {})
+            scanner_details = st.session_state.get("coupon_scanner_details")
+
+            # -- Pipeline-info --
+            if scanner_details and scanner_details.preprocessing_applied:
+                with st.expander("Pipeline-detaljer", expanded=False):
+                    st.markdown("**Bildforbehandling:**")
+                    for step in scanner_details.preprocessing_applied:
+                        st.caption(f"- {step}")
+
+                    if scanner_details.rows:
+                        st.markdown("**Radvis confidence:**")
+                        for i, srow in enumerate(scanner_details.rows):
+                            status_icon = {"ok": "🟢", "uncertain": "🟡", "failed": "🔴"}.get(srow.row_status, "⚪")
+                            team_info = f"{srow.home_team} vs {srow.away_team}" if srow.home_team else "(olasbara lag)"
+                            conf_pct = f"{srow.confidence_score:.0%}"
+                            mapping_info = ""
+                            if srow.home_team_mapped or srow.away_team_mapped:
+                                mapped_parts = []
+                                if srow.home_team_mapped and srow.home_team_raw != srow.home_team:
+                                    mapped_parts.append(f"{srow.home_team_raw} → {srow.home_team}")
+                                if srow.away_team_mapped and srow.away_team_raw != srow.away_team:
+                                    mapped_parts.append(f"{srow.away_team_raw} → {srow.away_team}")
+                                if mapped_parts:
+                                    mapping_info = f" (mappat: {'; '.join(mapped_parts)})"
+                            st.caption(
+                                f"{status_icon} Rad {i+1}: {team_info} — "
+                                f"Confidence: {conf_pct}{mapping_info}"
+                            )
+                            if srow.issues:
+                                for issue in srow.issues:
+                                    st.caption(f"   ⚠️ {issue}")
 
             # -- Extraktionsstatus --
             st.markdown("---")
@@ -987,17 +1042,27 @@ elif odds_mode == "Kupongbild (screenshot)":
             with ecol1:
                 st.metric("Rader tolkade", ext_status.get("total", 0))
             with ecol2:
-                st.metric("Fullstandiga", ext_status.get("complete", 0))
+                st.metric("Sakra (ok)", ext_status.get("complete", 0))
             with ecol3:
                 st.metric("Osakra", ext_status.get("uncertain", 0))
             with ecol4:
-                st.metric("Ofullstandiga", ext_status.get("incomplete", 0))
+                st.metric("Misslyckade", ext_status.get("incomplete", 0))
+
+            # -- Varning for osakra rader --
+            uncertain_count = ext_status.get("uncertain", 0)
+            incomplete_count = ext_status.get("incomplete", 0)
+            if uncertain_count > 0 or incomplete_count > 0:
+                st.warning(
+                    f"⚠️ {uncertain_count + incomplete_count} rad(er) behover granskas. "
+                    f"Kontrollera markerade rader i tabellen nedan."
+                )
 
             # -- Redigerbar kontrolltabell --
             st.markdown("---")
             st.subheader("Kontrolltabell — granska och ratta")
             st.caption(
                 "Ratta feltolkningar, ta bort trasiga rader, komplettera tomma varden. "
+                "Rader markerade som 'uncertain' eller 'incomplete' bor kontrolleras extra noga. "
                 "Analysen kors forst nar du bekraftar tabellen nedan."
             )
 
