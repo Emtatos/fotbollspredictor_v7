@@ -97,6 +97,8 @@ from streck_analysis import (
     rank_matches_by_streck_interest,
 )
 from streck_import import auto_load_streck
+from combined_probability import build_combined_match
+from ui_utils import pick_half_guards_combined, get_halfguard_sign_combined
 
 with st.expander("Ordlista: edge, value, streck", expanded=False):
     st.markdown(
@@ -675,6 +677,80 @@ if odds_mode == "Aktuell omgång (importera)":
                             "Storsta avvikelse": f"{sr.max_abs_delta:+.1%}",
                         })
                     st.dataframe(pd.DataFrame(mi_rows), use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # --- Kombinerade halvgarderingar (odds + streck + modell) ---
+            combined_matches_for_hg = []
+            for match in matchday_matches:
+                odds_1_val = None
+                odds_x_val = None
+                odds_2_val = None
+                if match.odds_report and match.odds_report.fair_probs:
+                    # Hämta genomsnittliga odds från bookmaker-odds
+                    if match.odds_report.bookmaker_odds:
+                        bm = match.odds_report.bookmaker_odds[0]
+                        odds_1_val = bm.home
+                        odds_x_val = bm.draw
+                        odds_2_val = bm.away
+
+                streck_1_val = None
+                streck_x_val = None
+                streck_2_val = None
+                if match.has_streck and match.streck:
+                    streck_1_val = match.streck.get("1")
+                    streck_x_val = match.streck.get("X")
+                    streck_2_val = match.streck.get("2")
+
+                cm = build_combined_match(
+                    home_team=match.home_team,
+                    away_team=match.away_team,
+                    odds_1=odds_1_val,
+                    odds_x=odds_x_val,
+                    odds_2=odds_2_val,
+                    streck_1=streck_1_val,
+                    streck_x=streck_x_val,
+                    streck_2=streck_2_val,
+                )
+                combined_matches_for_hg.append(cm)
+
+            # Visa halvgarderingsförslag
+            num_hg = st.number_input(
+                "Antal halvgarderingar:",
+                min_value=0,
+                max_value=len(matchday_matches),
+                value=min(3, len(matchday_matches)),
+                key="matchday_num_halfguards",
+            )
+
+            if num_hg > 0 and combined_matches_for_hg:
+                guard_indices = pick_half_guards_combined(combined_matches_for_hg, num_hg)
+
+                st.subheader("Halvgarderingar (kombinerad analys)")
+                hg_rows = []
+                for idx in guard_indices:
+                    cm = combined_matches_for_hg[idx]
+                    sign = get_halfguard_sign_combined(cm)
+                    hg_rows.append({
+                        "Match": f"{cm.home_team} vs {cm.away_team}",
+                        "Tips": sign,
+                        "Entropy": f"{cm.entropy:.3f}",
+                        "1": f"{cm.prob_1:.1%}",
+                        "X": f"{cm.prob_x:.1%}",
+                        "2": f"{cm.prob_2:.1%}",
+                    })
+                st.dataframe(pd.DataFrame(hg_rows), use_container_width=True, hide_index=True)
+
+                # Visa vilka signaler som användes
+                sources_used = []
+                if any(cm.sources["odds"] for cm in combined_matches_for_hg):
+                    sources_used.append("odds (50%)")
+                if any(cm.sources["model"] for cm in combined_matches_for_hg):
+                    sources_used.append("modell (35%)")
+                if any(cm.sources["streck"] for cm in combined_matches_for_hg):
+                    sources_used.append("streck (15%)")
+                if sources_used:
+                    st.caption(f"Halvgarderingar baserade på: {', '.join(sources_used)}")
 
             st.divider()
 

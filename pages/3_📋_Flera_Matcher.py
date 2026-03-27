@@ -17,10 +17,13 @@ from app_helpers import (
 from ui_utils import (
     get_halfguard_sign,
     pick_half_guards,
+    pick_half_guards_combined,
+    get_halfguard_sign_combined,
     parse_match_input,
     parse_match_input_with_errors,
     calculate_match_entropy,
 )
+from combined_probability import build_combined_match
 from utils import set_canonical_teams, get_canonical_teams
 
 # Ladda modell och data via gemensam helper
@@ -118,13 +121,36 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
                         "HALV": ""
                     })
 
+            # Bygg kombinerade sannolikheter för alla matcher
+            # (Flera Matcher har bara modell-probs, inga odds/streck)
+            combined_matches = []
+            for i, (home, away) in enumerate(matches):
+                cm = build_combined_match(
+                    home_team=home,
+                    away_team=away,
+                    model_probs=all_probs[i],
+                )
+                combined_matches.append(cm)
+
             # Applicera halvgarderingar
             if num_halfguards > 0:
+                # Fallback: Flera Matcher har bara modell → använd enbart modell
                 guard_indices = pick_half_guards(all_probs, num_halfguards)
                 for idx in guard_indices:
                     if all_probs[idx] is not None:
                         results[idx]["Tips"] = get_halfguard_sign(all_probs[idx])
                         results[idx]["HALV"] = "HALV"
+
+                # Visa vilka signaler som användes
+                sources_used = []
+                if any(cm.sources["odds"] for cm in combined_matches):
+                    sources_used.append("odds (50%)")
+                if any(cm.sources["model"] for cm in combined_matches):
+                    sources_used.append("modell (35%)")
+                if any(cm.sources["streck"] for cm in combined_matches):
+                    sources_used.append("streck (15%)")
+                if sources_used:
+                    st.caption(f"Halvgarderingar baserade på: {', '.join(sources_used)}")
 
             df_results = pd.DataFrame(results)
             st.dataframe(df_results, use_container_width=True, hide_index=True)
