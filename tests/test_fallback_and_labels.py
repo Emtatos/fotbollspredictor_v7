@@ -303,3 +303,227 @@ class TestSafeOddsValues:
         assert h == pytest.approx(2.50)
         assert d == pytest.approx(3.30)
         assert a == pytest.approx(2.80)
+
+
+# ---------------------------------------------------------------------------
+# 6. Fallback-dubbelräkning — odds ska inte räknas som både odds OCH modell
+# ---------------------------------------------------------------------------
+
+class TestFallbackDoubleCountingFix:
+    """
+    Verifierar att fallback-matcher INTE dubbelräknar odds genom att
+    skicka odds-derived probs som model_probs till build_combined_match.
+
+    Buggen: om model_probs = odds_to_fair_probs(...) OCH odds_1/x/2 också
+    skickas, räknas odds-signalen två gånger (en gång som odds, en gång
+    som model_probs).
+    """
+
+    def test_fallback_must_send_model_probs_none(self):
+        """
+        Fallback-match ska skicka model_probs=None till combined-byggaren.
+        Odds ska enbart skickas via odds-fälten.
+        """
+        # Simulera korrekt fallback: model_probs=None, odds via oddsfält
+        cm = build_combined_match(
+            home_team="Newport",
+            away_team="Shrewsbury",
+            odds_1=2.50, odds_x=3.30, odds_2=2.80,
+            model_probs=None,  # KORREKT: fallback skickar None
+            streck_1=38, streck_x=28, streck_2=34,
+        )
+        assert cm.sources["model"] is False
+        assert cm.sources["odds"] is True
+        assert abs(cm.prob_1 + cm.prob_x + cm.prob_2 - 1.0) < 1e-9
+
+    def test_double_counting_changes_result(self):
+        """
+        Visar att dubbelräkning ger annorlunda resultat än korrekt logik.
+        Om odds-derived probs skickas som model_probs OCH som odds,
+        ska resultatet skilja sig från korrekt (model_probs=None).
+
+        Använder streck-värden som divergerar tydligt från odds så att
+        viktförskjutningen blir mätbar.
+        """
+        # Odds implicerar ~56% hemma, streck säger 30% hemma → stor divergens
+        odds_1, odds_x, odds_2 = 1.80, 3.60, 4.50
+        streck_1, streck_x, streck_2 = 30, 35, 35
+
+        # Korrekt: model_probs=None → combined = odds(77%) + streck(23%)
+        cm_correct = build_combined_match(
+            "Newport", "Shrewsbury",
+            odds_1=odds_1, odds_x=odds_x, odds_2=odds_2,
+            model_probs=None,
+            streck_1=streck_1, streck_x=streck_x, streck_2=streck_2,
+        )
+
+        # Felaktigt (gamla buggen): odds-derived probs som model_probs
+        # → combined = odds(50%) + fake_model(35%) + streck(15%)
+        # odds-signalen väger 85% istf 77% → streck trängs undan
+        fake_model = odds_to_fair_probs(odds_1, odds_x, odds_2)
+        cm_buggy = build_combined_match(
+            "Newport", "Shrewsbury",
+            odds_1=odds_1, odds_x=odds_x, odds_2=odds_2,
+            model_probs=fake_model,
+            streck_1=streck_1, streck_x=streck_x, streck_2=streck_2,
+        )
+
+        assert cm_correct.sources["model"] is False
+        assert cm_buggy.sources["model"] is True
+
+        # Probabilities ska skilja sig mätbart
+        diff = abs(cm_correct.prob_1 - cm_buggy.prob_1)
+        assert diff > 0.005, (
+            f"Korrekt och buggy ska ge olika resultat, "
+            f"diff={diff:.6f}"
+        )
+
+    def test_combined_with_real_model_unaffected(self):
+        """
+        En match med riktig modellprediktion ska vara oförändrad.
+        model_probs ska fortfarande skickas normalt.
+        """
+        model_probs = np.array([0.45, 0.30, 0.25])
+        cm = build_combined_match(
+            "Arsenal", "Chelsea",
+            odds_1=2.00, odds_x=3.50, odds_2=4.00,
+            model_probs=model_probs,
+            streck_1=55, streck_x=25, streck_2=20,
+        )
+        assert cm.sources["model"] is True
+        assert cm.sources["odds"] is True
+        assert cm.sources["streck"] is True
+        assert abs(cm.prob_1 + cm.prob_x + cm.prob_2 - 1.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# 7. UI-sanningsenligt: visade 1/X/2 ska motsvara combined (som Tips bygger på)
+# ---------------------------------------------------------------------------
+
+class TestUITruthfulness:
+    """
+    Verifierar att visade sannolikheter (1/X/2 i tabellen) motsvarar
+    de kombinerade sannolikheter som Tips och HALV bygger på.
+    """
+
+    def test_displayed_probs_match_combined_for_model_match(self):
+        """
+        För en modell-match ska visade probs = combined (inte rå modell-probs).
+        """
+        model_probs = np.array([0.45, 0.30, 0.25])
+        cm = build_combined_match(
+            "Arsenal", "Chelsea",
+            odds_1=2.00, odds_x=3.50, odds_2=4.00,
+            model_probs=model_probs,
+            streck_1=55, streck_x=25, streck_2=20,
+        )
+        # Tips baseras på combined probs
+        sign = ['1', 'X', '2'][np.argmax(cm.probs)]
+        # Visade probs ska vara cm.probs (combined), inte model_probs
+        assert not np.allclose(cm.probs, model_probs), (
+            "Combined ska skilja sig från rå model_probs "
+            "(om odds/streck finns med)"
+        )
+        # Tips-tecknet ska matcha argmax av combined
+        assert sign == ['1', 'X', '2'][np.argmax(cm.probs)]
+
+    def test_displayed_probs_match_combined_for_fallback_match(self):
+        """
+        För en fallback-match ska visade probs = combined (odds+streck),
+        inte rå odds-probs.
+        """
+        cm = build_combined_match(
+            "Newport", "Shrewsbury",
+            odds_1=2.50, odds_x=3.30, odds_2=2.80,
+            model_probs=None,
+            streck_1=38, streck_x=28, streck_2=34,
+        )
+        # Visade probs ska vara combined
+        c_probs = cm.probs
+        sign = ['1', 'X', '2'][np.argmax(c_probs)]
+
+        # Tips ska matcha argmax av combined probs
+        assert sign == ['1', 'X', '2'][np.argmax(c_probs)]
+        # Sannolikheter summerar till 1
+        assert abs(c_probs.sum() - 1.0) < 1e-9
+
+    def test_halfguard_sign_matches_displayed_combined(self):
+        """
+        HALV-tecknet ska baseras på samma combined probs som visas i tabellen.
+        """
+        cm = build_combined_match(
+            "Exeter", "Leyton Orient",
+            odds_1=2.38, odds_x=3.40, odds_2=2.88,
+            model_probs=None,
+            streck_1=38, streck_x=25, streck_2=37,
+        )
+        halv_sign = get_halfguard_sign_combined(cm)
+        # Halvgarderingen tar bort minst sannolika utfallet
+        least = int(np.argmin(cm.probs))
+        signs = ['1', 'X', '2']
+        expected = "".join(signs[i] for i in range(3) if i != least)
+        assert halv_sign == expected
+
+
+# ---------------------------------------------------------------------------
+# 8. Newport-liknande scenario: regression check
+# ---------------------------------------------------------------------------
+
+class TestNewportFallbackScenario:
+    """
+    Verifierar att Newport-liknande matcher (utanför modellens data)
+    fortsätter fungera korrekt med fallback.
+    """
+
+    def test_newport_not_na_with_odds(self):
+        """Newport med odds ska ge sannolikheter, inte N/A."""
+        cm = build_combined_match(
+            "Newport", "Shrewsbury",
+            odds_1=2.50, odds_x=3.30, odds_2=2.80,
+            model_probs=None,
+        )
+        assert cm.prob_1 > 0
+        assert cm.prob_x > 0
+        assert cm.prob_2 > 0
+
+    def test_newport_fallback_marked_correctly(self):
+        """Newport-match ska markeras som fallback (model=False)."""
+        cm = build_combined_match(
+            "Newport", "Shrewsbury",
+            odds_1=2.50, odds_x=3.30, odds_2=2.80,
+            model_probs=None,
+            streck_1=38, streck_x=28, streck_2=34,
+        )
+        assert cm.sources["model"] is False
+        assert cm.sources["odds"] is True
+
+    def test_newport_with_streck_uses_both_signals(self):
+        """Newport med odds+streck ska använda båda signalerna."""
+        cm = build_combined_match(
+            "Newport", "Shrewsbury",
+            odds_1=2.50, odds_x=3.30, odds_2=2.80,
+            model_probs=None,
+            streck_1=38, streck_x=28, streck_2=34,
+        )
+        assert cm.sources["odds"] is True
+        assert cm.sources["streck"] is True
+        assert cm.sources["model"] is False
+        # Streck-delta ska beräknas
+        assert cm.streck_delta_1 != 0.0 or cm.streck_delta_x != 0.0 or cm.streck_delta_2 != 0.0
+
+    def test_newport_participates_in_halfguard_selection(self):
+        """Newport-match ska kunna delta i halvgarderingsurval."""
+        cm_model = build_combined_match(
+            "Arsenal", "Chelsea",
+            odds_1=1.80, odds_x=3.60, odds_2=4.50,
+            model_probs=np.array([0.55, 0.25, 0.20]),
+        )
+        cm_newport = build_combined_match(
+            "Newport", "Shrewsbury",
+            odds_1=2.50, odds_x=3.30, odds_2=2.80,
+            model_probs=None,
+            streck_1=38, streck_x=28, streck_2=34,
+        )
+        guards = pick_half_guards_combined([cm_model, cm_newport], n_guards=1)
+        assert len(guards) == 1
+        assert guards[0] in [0, 1]

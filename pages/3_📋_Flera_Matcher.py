@@ -164,74 +164,45 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
         else:
             st.subheader(f"📊 Resultat för {len(matches)} matcher")
 
-            results = []
-            all_probs = []
-            data_sources = []  # "modell", "odds (fallback)", "N/A"
+            # Separera tydligt:
+            #   model_probs_list  — riktiga modellprobabiliteter (None om fallback)
+            #   data_sources      — "modell", "odds (fallback)", "N/A"
+            #   trust_labels      — trust-etikett per match
+            model_probs_list = []   # None för fallback-matcher
+            data_sources = []       # "modell", "odds (fallback)", "N/A"
+            trust_labels = []       # trust-etikett per match
 
             for home, away in matches:
                 result = predict_match(model, home, away, df_features)
 
                 if result is not None:
                     probs, stats = result
-                    all_probs.append(probs)
+                    model_probs_list.append(probs)
                     data_sources.append("modell")
-
-                    sign = ['1', 'X', '2'][np.argmax(probs)]
                     trust_lbl = stats.get('trust_label', 'N/A')
                     if trust_lbl == "LOW":
                         trust_lbl = "LOW (varning)"
-
-                    results.append({
-                        "Match": f"{home} - {away}",
-                        "1": f"{probs[0]:.1%}",
-                        "X": f"{probs[1]:.1%}",
-                        "2": f"{probs[2]:.1%}",
-                        "Källa": "modell",
-                        "Trust": trust_lbl,
-                        "Tips": sign,
-                        "HALV": ""
-                    })
+                    trust_labels.append(trust_lbl)
                 else:
-                    # --- Fallback: odds/streck från current_round ---
-                    odds_entries, streck_dict = _lookup_round_odds(home, away)
+                    # Fallback: modell saknas — skicka INTE odds som model_probs
+                    model_probs_list.append(None)
 
-                    fallback_probs = None
+                    # Kolla om odds finns (för att skilja fallback från N/A)
+                    odds_entries, _ = _lookup_round_odds(home, away)
+                    has_odds = False
                     if odds_entries:
                         o1, ox, o2 = _safe_odds_values(odds_entries[0])
-                        if o1 is not None:
-                            fallback_probs = odds_to_fair_probs(o1, ox, o2)
+                        has_odds = o1 is not None
 
-                    if fallback_probs is not None:
-                        all_probs.append(fallback_probs)
+                    if has_odds:
                         data_sources.append("odds (fallback)")
-
-                        sign = ['1', 'X', '2'][np.argmax(fallback_probs)]
-
-                        results.append({
-                            "Match": f"{home} - {away}",
-                            "1": f"{fallback_probs[0]:.1%}",
-                            "X": f"{fallback_probs[1]:.1%}",
-                            "2": f"{fallback_probs[2]:.1%}",
-                            "Källa": "odds (fallback)",
-                            "Trust": "—",
-                            "Tips": sign,
-                            "HALV": ""
-                        })
                     else:
-                        all_probs.append(None)
                         data_sources.append("N/A")
-                        results.append({
-                            "Match": f"{home} - {away}",
-                            "1": "N/A",
-                            "X": "N/A",
-                            "2": "N/A",
-                            "Källa": "saknas",
-                            "Trust": "N/A",
-                            "Tips": "?",
-                            "HALV": ""
-                        })
+                    trust_labels.append("—" if has_odds else "N/A")
 
-            # Bygg kombinerade sannolikheter med odds/streck från current_round
+            # Bygg kombinerade sannolikheter med odds/streck från current_round.
+            # FIX: fallback-matcher skickar model_probs=None så att odds
+            # inte dubbelräknas (en gång som odds, en gång som model_probs).
             combined_matches = []
             for i, (home, away) in enumerate(matches):
                 odds_entries, streck_dict = _lookup_round_odds(home, away)
@@ -255,12 +226,61 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
                     odds_1=odds_1_val,
                     odds_x=odds_x_val,
                     odds_2=odds_2_val,
-                    model_probs=all_probs[i],
+                    model_probs=model_probs_list[i],   # None för fallback
                     streck_1=streck_1_val,
                     streck_x=streck_x_val,
                     streck_2=streck_2_val,
                 )
                 combined_matches.append(cm)
+
+            # Bygg resultat-tabell.
+            # UI visar *kombinerade* sannolikheter i 1/X/2 — samma som
+            # Tips och HALV bygger på — så att tabellen är sanningsenlig.
+            results = []
+            for i, (home, away) in enumerate(matches):
+                cm = combined_matches[i]
+                ds = data_sources[i]
+
+                if ds == "N/A":
+                    results.append({
+                        "Match": f"{home} - {away}",
+                        "1": "N/A",
+                        "X": "N/A",
+                        "2": "N/A",
+                        "Källa": "saknas",
+                        "Trust": "N/A",
+                        "Tips": "?",
+                        "HALV": ""
+                    })
+                else:
+                    # Bygg källbeskrivning från combined-signaler
+                    source_parts = []
+                    if cm.sources["model"]:
+                        source_parts.append("modell")
+                    if cm.sources["odds"]:
+                        source_parts.append("odds")
+                    if cm.sources["streck"]:
+                        source_parts.append("streck")
+                    if ds == "odds (fallback)":
+                        source_label = "odds fallback"
+                        if cm.sources["streck"]:
+                            source_label += " + streck"
+                    else:
+                        source_label = " + ".join(source_parts) if source_parts else ds
+
+                    c_probs = cm.probs
+                    sign = ['1', 'X', '2'][np.argmax(c_probs)]
+
+                    results.append({
+                        "Match": f"{home} - {away}",
+                        "1": f"{c_probs[0]:.1%}",
+                        "X": f"{c_probs[1]:.1%}",
+                        "2": f"{c_probs[2]:.1%}",
+                        "Källa": source_label,
+                        "Trust": trust_labels[i],
+                        "Tips": sign,
+                        "HALV": ""
+                    })
 
             # Applicera halvgarderingar
             if num_halfguards > 0:
@@ -301,6 +321,11 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
                         f"{n_missing} match(er) saknar all data (varken modell eller odds)"
                     )
                 st.warning(". ".join(parts) + ".")
+
+            st.caption(
+                "Visade sannolikheter (1/X/2) är de kombinerade sannolikheter "
+                "som Tips och halvgarderingar bygger på."
+            )
 
             df_results = pd.DataFrame(results)
             st.dataframe(df_results, use_container_width=True, hide_index=True)
