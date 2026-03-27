@@ -122,6 +122,28 @@ class TestComputeBlockMetrics:
         assert 0.0 <= metrics['combined_ticket_hit_rate'] <= 1.0
         assert metrics['brier'] >= 0.0
 
+    def test_halfguards_selected_by_gain_not_entropy(self):
+        """Test that half-guards are selected by gain (second_best), not entropy."""
+        # Match 0: high entropy (near uniform) but low gain
+        # Match 1: lower entropy but high gain (second_best = 0.40)
+        # Match 2: filler
+        y_true = np.array([0, 0, 0])
+        y_proba = np.array([
+            [0.34, 0.33, 0.33],  # gain=0.33, high entropy
+            [0.55, 0.40, 0.05],  # gain=0.40, lower entropy
+            [0.80, 0.15, 0.05],  # gain=0.15, low entropy
+        ])
+        pred_top1 = np.argmax(y_proba, axis=1)
+        entropy_values = np.zeros(3)  # not used for selection anymore
+
+        metrics = compute_block_metrics(
+            y_true, y_proba, pred_top1, entropy_values, n_half=1
+        )
+
+        # With gain-based selection, match 1 (gain=0.40) should be the half-guard.
+        # Match 1 true label is 0, top-2 for match 1 is {0, 1} → hit.
+        assert metrics['accuracy_top2_on_halfguards'] == 1.0
+
 
 class TestBacktestReportScript:
     """Integration tests for the backtest report script."""
