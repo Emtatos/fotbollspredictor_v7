@@ -926,8 +926,7 @@ elif odds_mode == "Kupongbild (screenshot)":
 
     st.subheader("Kupongbild — ladda upp skarmbilden")
     st.markdown(
-        "Ladda upp en skärmbild av kupongen. Appen kör en **förbättrad scanningpipeline** "
-        "med bildförbehandling, radvis extraktion, lagmatchning och validering. "
+        "Ladda upp en skärmbild av kupongen. "
         "Du granskar och rättar i en kontrolltabell innan analysen körs."
     )
 
@@ -937,6 +936,18 @@ elif odds_mode == "Kupongbild (screenshot)":
         type=["png", "jpg", "jpeg", "webp"],
         key="coupon_image_upload",
         help="Stödda format: PNG, JPG, JPEG, WEBP",
+    )
+
+    # -- Pipeline opt-in --
+    use_new_pipeline = st.checkbox(
+        "Anvand forbattrad pipeline (experimentell)",
+        value=False,
+        help=(
+            "Aktivera den nya scannerpipelinen med bildforbehandling, "
+            "radvis extraktion, lagmatchning och validering. "
+            "Legacy-parsern anvands som standard."
+        ),
+        key="coupon_use_pipeline",
     )
 
     if coupon_file is not None:
@@ -957,7 +968,12 @@ elif odds_mode == "Kupongbild (screenshot)":
         )
 
         if extract_btn:
-            with st.spinner("Kor forbattrad scannerpipeline (forbehandling → AI → validering → lagmapping)..."):
+            _spinner_msg = (
+                "Kor forbattrad scannerpipeline (forbehandling → AI → validering → lagmapping)..."
+                if use_new_pipeline
+                else "Kor kupongparser (AI-extraktion)..."
+            )
+            with st.spinner(_spinner_msg):
                 image_bytes = coupon_file.getvalue()
 
                 # Hamta kanoniska lag fran laddad data om tillganglig
@@ -965,24 +981,27 @@ elif odds_mode == "Kupongbild (screenshot)":
                 if all_teams:
                     _scanner_canonical = set(all_teams)
 
-                # Kor pipelinen en gang och ateranvand resultatet
-                try:
-                    scanner_result = run_scanner_pipeline(
-                        image_bytes,
-                        coupon_file.name,
-                        canonical_teams=_scanner_canonical,
-                    )
-                    st.session_state["coupon_scanner_details"] = scanner_result
-                except Exception:
-                    scanner_result = None
-                    st.session_state["coupon_scanner_details"] = None
+                scanner_result = None
+                st.session_state["coupon_scanner_details"] = None
 
-                # Konvertera till CouponExtractionResult for bakatkompabilitet
+                if use_new_pipeline:
+                    # Kor den nya pipelinen med fallback till legacy
+                    try:
+                        scanner_result = run_scanner_pipeline(
+                            image_bytes,
+                            coupon_file.name,
+                            canonical_teams=_scanner_canonical,
+                        )
+                        st.session_state["coupon_scanner_details"] = scanner_result
+                    except Exception:
+                        scanner_result = None
+
+                # Konvertera till CouponExtractionResult
                 if scanner_result is not None:
                     from scanner_pipeline import scanner_result_to_extraction_result
                     result = scanner_result_to_extraction_result(scanner_result)
                 else:
-                    # Fallback till legacy-parsning om pipelinen misslyckades
+                    # Legacy-parsning (standard) eller fallback
                     result = parse_coupon_image(
                         image_bytes,
                         coupon_file.name,

@@ -23,7 +23,6 @@ import base64
 import io
 import json
 import logging
-import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,15 +34,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Dataklasser for pipeline-output
 # ---------------------------------------------------------------------------
-
-@dataclass
-class FieldConfidence:
-    """Confidence for ett enskilt falt."""
-    value: Any = None
-    raw_text: str = ""
-    confidence: float = 1.0  # 0.0-1.0
-    issue: str = ""
-
 
 @dataclass
 class ScannedRow:

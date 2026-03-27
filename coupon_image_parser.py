@@ -148,18 +148,21 @@ def parse_coupon_image(
     api_key: Optional[str] = None,
     model: str = "gpt-4o-mini",
     canonical_teams: Optional[set] = None,
-    use_pipeline: bool = True,
+    use_pipeline: bool = False,
 ) -> CouponExtractionResult:
     """
     Tolkar en kupongbild och extraherar matcher, streck och odds.
 
-    Anvander den forbattrade scannerpipelinen (scanner_pipeline.py) som
-    standard. Pipelinen inkluderar:
+    Kan anvanda den forbattrade scannerpipelinen (scanner_pipeline.py) via
+    use_pipeline=True. Pipelinen inkluderar:
     - Bildforbehandling (kontrast, skalning, skarpning)
     - Forbattrad AI-prompt for radvis extraktion
     - Faltvis parsning och validering
     - Canonical team mapping med fuzzy-matchning
     - Confidence/uncertainty per rad och falt
+
+    Legacy-parsern (use_pipeline=False) ar standard tills pipelinen ar
+    verifierad pa riktiga kupongbilder.
 
     Parametrar
     ----------
@@ -174,7 +177,7 @@ def parse_coupon_image(
     canonical_teams : set, optional
         Mangd av kanda kanoniska lagnamn for team mapping.
     use_pipeline : bool
-        Om True, anvand den forbattrade pipelinen. Standard: True.
+        Om True, anvand den forbattrade pipelinen. Standard: False (legacy).
 
     Returnerar
     ----------
