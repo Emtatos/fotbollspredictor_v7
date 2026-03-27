@@ -8,6 +8,27 @@ from utils import normalize_team_name
 from uncertainty import entropy_norm
 from combined_probability import CombinedMatchProbability
 
+
+def _halfguard_sort_key(probs: Optional[np.ndarray], index: int) -> Tuple[float, float, int]:
+    """
+    Beräknar sorteringsnyckel för halvgarderingsurval.
+
+    Returnerar (gain, top2, -index) där:
+    - gain = second_best probability (marginalnytta av halvgardering)
+    - top2 = best + second_best
+    - -index = negativt index för deterministisk tie-break (lägst index först)
+
+    Matcher med None/saknade sannolikheter får lägst prioritet (gain=0, top2=0).
+    """
+    if probs is None:
+        return (0.0, 0.0, -index)
+    sorted_desc = sorted(probs, reverse=True)
+    best = sorted_desc[0]
+    second = sorted_desc[1]
+    top2 = best + second
+    gain = second
+    return (gain, top2, -index)
+
 def parse_match_input(text_input: str) -> List[Tuple[str, str]]:
     """
     Parar en text med flera rader av matcher (t.ex. "Arsenal - Chelsea")
@@ -100,33 +121,27 @@ def parse_match_input_with_errors(text_input: str) -> Tuple[List[Tuple[str, str]
 
 def pick_half_guards(match_probs: List[Optional[np.ndarray]], n_guards: int) -> List[int]:
     """
-    Väljer ut de mest osäkra matcherna för halvgardering baserat på entropy.
+    Väljer ut matcher för halvgardering baserat på marginalnytta (gain).
 
-    Strategi: Välj matcher med högst entropy (osäkerhet över hela 1/X/2-fördelningen).
-    Matcher som saknar data (None) får högsta prioritet för gardering (entropy = 2.0).
+    Strategi: Välj matcher där en halvgardering ger störst ökning i
+    träffsannolikhet, dvs. högst gain = second_best probability.
+
+    Sortering:
+    1. Högst gain (second_best) först
+    2. Vid lika: högst top2 (best + second_best)
+    3. Vid fortsatt lika: lägst index (deterministisk tie-break)
+
+    Matcher som saknar data (None) får lägst prioritet.
 
     Returnerar en lista med index för de matcher som ska halvgarderas.
     """
     if n_guards <= 0:
         return []
 
-    scored_matches = []
-    for i, probs in enumerate(match_probs):
-        if probs is None:
-            # Ge matcher utan data högsta prioritet (entropy > 1.0)
-            entropy = 2.0
-        else:
-            # Beräkna normaliserad entropy för sannolikhetsfördelningen
-            entropy = entropy_norm(probs[0], probs[1], probs[2])
-        
-        scored_matches.append({'entropy': entropy, 'index': i})
+    indexed = [(i, probs) for i, probs in enumerate(match_probs)]
+    indexed.sort(key=lambda x: _halfguard_sort_key(x[1], x[0]), reverse=True)
 
-    # Sortera efter entropy (högst först, dvs. mest osäker först)
-    scored_matches.sort(key=lambda x: x['entropy'], reverse=True)
-    
-    # Välj ut de n_guards bästa indexen
-    guard_indices = [match['index'] for match in scored_matches[:n_guards]]
-    return guard_indices
+    return [i for i, _ in indexed[:n_guards]]
 
 
 def calculate_match_entropy(probs: Optional[np.ndarray]) -> Optional[float]:
@@ -164,37 +179,23 @@ def pick_half_guards_combined(
     n_guards: int,
 ) -> List[int]:
     """
-    Väljer halvgarderingar baserat på kombinerad entropy
-    från odds + modell + streck.
+    Väljer halvgarderingar baserat på marginalnytta (gain) från
+    den kombinerade sannolikheten (odds + modell + streck).
 
     Strategi:
-    1. Sortera på kombinerad entropy (högst = mest osäker)
-    2. Vid lika entropy, prioritera matcher med högt streck-delta
-       (överstreckat utfall = folket har fel → extra osäkert)
+    1. Beräkna gain = second_best probability från cm.probs
+    2. Sortera på högst gain först
+    3. Vid lika: högst top2 (best + second_best)
+    4. Vid fortsatt lika: lägst index (deterministisk tie-break)
 
     Returnerar lista med index.
     """
     if n_guards <= 0:
         return []
 
-    scored = []
-    for i, cm in enumerate(combined_matches):
-        # Primär: entropy från kombinerad sannolikhet
-        # Sekundär: max streck-delta (överstreckat = extra osäkerhet)
-        max_streck_delta = max(
-            abs(cm.streck_delta_1),
-            abs(cm.streck_delta_x),
-            abs(cm.streck_delta_2),
-        )
-        scored.append({
-            "index": i,
-            "entropy": cm.entropy,
-            "streck_delta": max_streck_delta,
-        })
-
-    # Sortera: högst entropy först, vid lika → högst streck-delta
-    scored.sort(key=lambda x: (x["entropy"], x["streck_delta"]), reverse=True)
-    return [s["index"] for s in scored[:n_guards]]
+    indexed = [(i, cm.probs) for i, cm in enumerate(combined_matches)]
+    indexed.sort(key=lambda x: _halfguard_sort_key(x[1], x[0]), reverse=True)
+    return [i for i, _ in indexed[:n_guards]]
 
 
 def get_halfguard_sign_combined(cm: CombinedMatchProbability) -> str:

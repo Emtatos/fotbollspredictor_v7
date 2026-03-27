@@ -3,7 +3,12 @@ Enhetstester för ui_utils.py
 """
 import pytest
 import numpy as np
-from ui_utils import parse_match_input, parse_match_input_with_errors, pick_half_guards, get_halfguard_sign, calculate_match_entropy
+from ui_utils import (
+    parse_match_input, parse_match_input_with_errors,
+    pick_half_guards, get_halfguard_sign, calculate_match_entropy,
+    pick_half_guards_combined, get_halfguard_sign_combined,
+)
+from combined_probability import CombinedMatchProbability
 from utils import set_canonical_teams
 
 
@@ -167,70 +172,92 @@ class TestParseMatchInputWithErrors:
 
 
 class TestPickHalfGuards:
-    """Tester för pick_half_guards-funktionen (entropy-baserad)"""
-    
-    def test_pick_most_uncertain_matches_by_entropy(self):
-        """Testar att matcher med högst entropy väljs för halvgardering"""
-        # Skapa sannolikheter där andra matchen har högst entropy (mest osäker)
+    """Tester för pick_half_guards-funktionen (gain-baserad)"""
+
+    def test_pick_highest_gain_match(self):
+        """Testar att matchen med högst gain (second_best) väljs"""
         probs = [
-            np.array([0.7, 0.2, 0.1]),  # Tydlig favorit, låg entropy
-            np.array([0.34, 0.33, 0.33]),  # Nära uniform, hög entropy
-            np.array([0.6, 0.3, 0.1])   # Ganska tydlig, medel entropy
+            np.array([0.7, 0.2, 0.1]),   # gain=0.2, top2=0.9
+            np.array([0.55, 0.40, 0.05]), # gain=0.40, top2=0.95
+            np.array([0.6, 0.3, 0.1]),    # gain=0.3, top2=0.9
         ]
-        
         result = pick_half_guards(probs, n_guards=1)
-        
-        # Index 1 (andra matchen med högst entropy) ska väljas
-        assert 1 in result
-    
-    def test_entropy_based_selection_order(self):
-        """Testar att urvalet sorteras efter entropy (högst först)"""
+        assert result == [1]
+
+    def test_gain_beats_higher_entropy(self):
+        """Testar att match med högst gain väljs framför match med högre entropy men sämre gain"""
         probs = [
-            np.array([0.7, 0.2, 0.1]),  # Låg entropy
-            np.array([0.34, 0.33, 0.33]),  # Högst entropy (nära uniform)
-            np.array([0.5, 0.3, 0.2])   # Medel entropy
+            np.array([0.34, 0.33, 0.33]),  # gain=0.33, top2=0.67 (hög entropy)
+            np.array([0.55, 0.40, 0.05]),   # gain=0.40, top2=0.95 (lägre entropy)
         ]
-        
+        result = pick_half_guards(probs, n_guards=1)
+        assert result == [1]
+
+    def test_none_not_prioritized(self):
+        """Testar att matcher utan data (None) INTE prioriteras för gardering"""
+        probs = [
+            np.array([0.55, 0.40, 0.05]),  # gain=0.40
+            None,                            # gain=0.0 (lägst prioritet)
+            np.array([0.6, 0.3, 0.1]),      # gain=0.3
+        ]
+        result = pick_half_guards(probs, n_guards=1)
+        assert result == [0]
+
+    def test_none_gets_lowest_priority(self):
+        """Testar att None hamnar sist i urvalslistan"""
+        probs = [
+            None,
+            np.array([0.55, 0.40, 0.05]),  # gain=0.40
+        ]
         result = pick_half_guards(probs, n_guards=2)
-        
-        # Index 1 ska komma först (högst entropy), sedan index 2
         assert result[0] == 1
-        assert result[1] == 2
-    
-    def test_none_values_prioritized(self):
-        """Testar att matcher utan data prioriteras för gardering"""
+        assert result[1] == 0
+
+    def test_tiebreak_by_top2(self):
+        """Testar att vid lika gain, högst top2 väljs"""
         probs = [
-            np.array([0.7, 0.2, 0.1]),
-            None,  # Saknar data
-            np.array([0.6, 0.3, 0.1])
+            np.array([0.50, 0.35, 0.15]),  # gain=0.35, top2=0.85
+            np.array([0.55, 0.35, 0.10]),  # gain=0.35, top2=0.90
         ]
-        
         result = pick_half_guards(probs, n_guards=1)
-        
-        # Index 1 (None) ska prioriteras
-        assert 1 in result
-    
+        assert result == [1]
+
+    def test_tiebreak_by_index(self):
+        """Testar att vid lika gain och top2, lägst index väljs"""
+        probs = [
+            np.array([0.55, 0.35, 0.10]),  # gain=0.35, top2=0.90
+            np.array([0.55, 0.35, 0.10]),  # gain=0.35, top2=0.90
+        ]
+        result = pick_half_guards(probs, n_guards=1)
+        assert result == [0]
+
+    def test_selection_order_by_gain(self):
+        """Testar att urvalet sorteras efter gain (högst först)"""
+        probs = [
+            np.array([0.7, 0.2, 0.1]),   # gain=0.2
+            np.array([0.55, 0.40, 0.05]), # gain=0.40
+            np.array([0.5, 0.3, 0.2]),    # gain=0.3
+        ]
+        result = pick_half_guards(probs, n_guards=2)
+        assert result[0] == 1  # gain=0.40
+        assert result[1] == 2  # gain=0.3
+
     def test_zero_guards_requested(self):
         """Testar när inga garderingar begärs"""
         probs = [
             np.array([0.7, 0.2, 0.1]),
             np.array([0.4, 0.35, 0.25])
         ]
-        
         result = pick_half_guards(probs, n_guards=0)
-        
         assert len(result) == 0
-    
+
     def test_more_guards_than_matches(self):
         """Testar när fler garderingar begärs än det finns matcher"""
         probs = [
             np.array([0.7, 0.2, 0.1]),
             np.array([0.4, 0.35, 0.25])
         ]
-        
         result = pick_half_guards(probs, n_guards=5)
-        
-        # Ska returnera max 2 (antalet matcher)
         assert len(result) <= 2
 
 
@@ -267,34 +294,94 @@ class TestGetHalfguardSign:
     
     def test_remove_least_likely_outcome(self):
         """Testar att minst sannolika utfallet tas bort"""
-        # Hemmavinst mest sannolik, bortavinst minst sannolik
         probs = np.array([0.6, 0.3, 0.1])
         result = get_halfguard_sign(probs)
-        
-        # Ska returnera "1X" (ta bort 2)
         assert result == "1X"
     
     def test_draw_least_likely(self):
         """Testar när oavgjort är minst sannolikt"""
         probs = np.array([0.5, 0.1, 0.4])
         result = get_halfguard_sign(probs)
-        
-        # Ska returnera "12" (ta bort X)
         assert result == "12"
     
     def test_home_win_least_likely(self):
         """Testar när hemmavinst är minst sannolikt"""
         probs = np.array([0.1, 0.4, 0.5])
         result = get_halfguard_sign(probs)
-        
-        # Ska returnera "X2" (ta bort 1)
         assert result == "X2"
     
     def test_equal_probabilities(self):
         """Testar med lika sannolikheter"""
         probs = np.array([0.33, 0.33, 0.34])
         result = get_halfguard_sign(probs)
-        
-        # Ska ta bort ett av de två första (minst sannolika)
         assert result in ["1X", "X2", "12"]
         assert len(result) == 2
+
+
+class TestPickHalfGuardsCombined:
+    """Tester för pick_half_guards_combined (gain-baserad)"""
+
+    def _make_cm(self, p1, px, p2, home="A", away="B"):
+        """Hjälpmetod för att skapa CombinedMatchProbability."""
+        from uncertainty import entropy_norm
+        return CombinedMatchProbability(
+            home_team=home,
+            away_team=away,
+            prob_1=p1,
+            prob_x=px,
+            prob_2=p2,
+            entropy=entropy_norm(p1, px, p2),
+            sources={"odds": True, "model": True, "streck": True},
+        )
+
+    def test_combined_picks_highest_gain(self):
+        """Testar att combined-logiken väljer matchen med högst gain"""
+        cms = [
+            self._make_cm(0.7, 0.2, 0.1),   # gain=0.2
+            self._make_cm(0.55, 0.40, 0.05), # gain=0.40
+        ]
+        result = pick_half_guards_combined(cms, n_guards=1)
+        assert result == [1]
+
+    def test_combined_tiebreak_by_top2(self):
+        """Testar att vid lika gain, högst top2 väljs i combined"""
+        cms = [
+            self._make_cm(0.50, 0.35, 0.15),  # gain=0.35, top2=0.85
+            self._make_cm(0.55, 0.35, 0.10),  # gain=0.35, top2=0.90
+        ]
+        result = pick_half_guards_combined(cms, n_guards=1)
+        assert result == [1]
+
+    def test_combined_zero_guards(self):
+        """Testar att 0 garderingar returnerar tom lista"""
+        cms = [self._make_cm(0.5, 0.3, 0.2)]
+        result = pick_half_guards_combined(cms, n_guards=0)
+        assert result == []
+
+
+class TestGetHalfguardSignCombined:
+    """Tester för get_halfguard_sign_combined-funktionen"""
+
+    def _make_cm(self, p1, px, p2):
+        from uncertainty import entropy_norm
+        return CombinedMatchProbability(
+            home_team="A",
+            away_team="B",
+            prob_1=p1,
+            prob_x=px,
+            prob_2=p2,
+            entropy=entropy_norm(p1, px, p2),
+            sources={"odds": True, "model": True, "streck": True},
+        )
+
+    def test_removes_least_likely(self):
+        """Testar att minst sannolika utfallet tas bort"""
+        cm = self._make_cm(0.6, 0.3, 0.1)
+        result = get_halfguard_sign_combined(cm)
+        assert result == "1X"
+
+    def test_removes_home_when_least_likely(self):
+        """Testar att hemmavinst tas bort om minst sannolik"""
+        cm = self._make_cm(0.1, 0.4, 0.5)
+        result = get_halfguard_sign_combined(cm)
+        assert result == "X2"

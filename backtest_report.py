@@ -3,7 +3,7 @@
 Backtest Report - Walk-forward light backtest for fotbollspredictor.
 
 Performs a time-based walk-forward backtest using tertiles (3 time segments)
-and reports metrics including entropy-based half-guard hit rates.
+and reports metrics including gain-based half-guard hit rates.
 
 Usage:
     python backtest_report.py              # Use cached data (default)
@@ -240,8 +240,16 @@ def compute_block_metrics(
     # Top-1 accuracy
     accuracy_top1 = accuracy_score(y_true, pred_top1)
     
-    # Select half-guards (highest entropy)
-    half_guard_indices = np.argsort(entropy_values)[-n_half:] if n_half > 0 else np.array([])
+    # Select half-guards by highest gain (second_best probability)
+    if n_half > 0:
+        sorted_desc = np.sort(y_proba, axis=1)[:, ::-1]
+        gains = sorted_desc[:, 1]  # second_best for each match
+        top2s = sorted_desc[:, 0] + sorted_desc[:, 1]
+        # Sort by (-gain, -top2, index) to match ui_utils logic
+        order = np.lexsort((np.arange(n_matches), -top2s, -gains))
+        half_guard_indices = order[:n_half]
+    else:
+        half_guard_indices = np.array([])
     
     # Top-2 predictions
     top2_preds = get_top2_predictions(y_proba)
@@ -618,7 +626,7 @@ def print_report(all_metrics: List[Dict], high_trust_metrics: Optional[Dict] = N
     print("\n" + "=" * 60)
     print("LEGEND:")
     print("  Acc_Top1      = Top-1 accuracy (argmax prediction)")
-    print("  Acc_Top2_HG   = Top-2 accuracy on half-guards (entropy-selected)")
+    print("  Acc_Top2_HG   = Top-2 accuracy on half-guards (gain-selected)")
     print("  Combined      = Combined ticket hit rate (top1 + top2 for HG)")
     print("  LogLoss       = Multiclass log loss")
     print("  Brier         = Multiclass Brier score")

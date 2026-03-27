@@ -78,34 +78,64 @@ Liverpool - Manchester United"""
 
 
 class TestPickHalfGuards:
-    """Tester för pick_half_guards-funktionen"""
+    """Tester för pick_half_guards-funktionen (gain-baserad)"""
     
-    def test_pick_most_uncertain_matches(self):
-        """Testar att de mest osäkra matcherna väljs"""
-        # Skapa sannolikheter där andra matchen är mest osäker
+    def test_pick_highest_gain_match(self):
+        """Testar att matchen med högst gain (second_best) väljs"""
         probs = [
-            np.array([0.7, 0.2, 0.1]),  # Tydlig favorit
-            np.array([0.4, 0.35, 0.25]),  # Mycket osäker
-            np.array([0.6, 0.3, 0.1])   # Ganska tydlig
+            np.array([0.7, 0.2, 0.1]),   # gain=0.2, top2=0.9
+            np.array([0.55, 0.40, 0.05]), # gain=0.40, top2=0.95
+            np.array([0.6, 0.3, 0.1]),    # gain=0.3, top2=0.9
         ]
-        
         result = pick_half_guards(probs, n_guards=1)
-        
-        # Index 1 (andra matchen) ska väljas
-        assert 1 in result
-    
-    def test_none_values_prioritized(self):
-        """Testar att matcher utan data prioriteras för gardering"""
+        assert result == [1]
+
+    def test_gain_beats_higher_entropy(self):
+        """Testar att match med högst gain väljs framför match med högre entropy men sämre gain"""
         probs = [
-            np.array([0.7, 0.2, 0.1]),
-            None,  # Saknar data
-            np.array([0.6, 0.3, 0.1])
+            np.array([0.34, 0.33, 0.33]),  # gain=0.33, top2=0.67 (hög entropy)
+            np.array([0.55, 0.40, 0.05]),   # gain=0.40, top2=0.95 (lägre entropy)
         ]
-        
         result = pick_half_guards(probs, n_guards=1)
-        
-        # Index 1 (None) ska prioriteras
-        assert 1 in result
+        assert result == [1]
+
+    def test_none_not_prioritized(self):
+        """Testar att matcher utan data (None) INTE prioriteras för gardering"""
+        probs = [
+            np.array([0.55, 0.40, 0.05]),  # gain=0.40
+            None,                            # gain=0.0 (lägst prioritet)
+            np.array([0.6, 0.3, 0.1]),      # gain=0.3
+        ]
+        result = pick_half_guards(probs, n_guards=1)
+        assert result == [0]
+
+    def test_none_gets_lowest_priority(self):
+        """Testar att None hamnar sist i urvalslistan"""
+        probs = [
+            None,
+            np.array([0.55, 0.40, 0.05]),  # gain=0.40
+        ]
+        result = pick_half_guards(probs, n_guards=2)
+        assert result[0] == 1
+        assert result[1] == 0
+
+    def test_tiebreak_by_top2(self):
+        """Testar att vid lika gain, högst top2 väljs"""
+        probs = [
+            np.array([0.50, 0.35, 0.15]),  # gain=0.35, top2=0.85
+            np.array([0.55, 0.35, 0.10]),  # gain=0.35, top2=0.90
+        ]
+        result = pick_half_guards(probs, n_guards=1)
+        assert result == [1]
+
+    def test_tiebreak_by_index(self):
+        """Testar att vid lika gain och top2, lägst index väljs"""
+        probs = [
+            np.array([0.55, 0.35, 0.10]),  # gain=0.35, top2=0.90
+            np.array([0.55, 0.35, 0.10]),  # gain=0.35, top2=0.90
+        ]
+        result = pick_half_guards(probs, n_guards=1)
+        assert result == [0]
     
     def test_zero_guards_requested(self):
         """Testar när inga garderingar begärs"""
