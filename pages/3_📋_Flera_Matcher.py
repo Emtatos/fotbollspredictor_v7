@@ -28,7 +28,7 @@ from ui_utils import (
     calculate_match_entropy,
 )
 from combined_probability import build_combined_match, odds_to_fair_probs
-from utils import normalize_team_name, set_canonical_teams, get_canonical_teams
+from utils import set_canonical_teams, get_canonical_teams
 from matchday_import import _make_key
 
 # Ladda modell och data via gemensam helper
@@ -86,6 +86,24 @@ col1, col2 = st.columns(2)
 
 
 # ---- Hjälpfunktion: hämta odds/streck från current_round ----
+
+def _safe_odds_values(entry):
+    """Extrahera (home, draw, away) från OddsEntry-objekt eller dict utan krasch."""
+    if entry is None:
+        return None, None, None
+    try:
+        if hasattr(entry, "home"):
+            return float(entry.home), float(entry.draw), float(entry.away)
+        if isinstance(entry, dict):
+            return (
+                float(entry["home"]),
+                float(entry["draw"]),
+                float(entry["away"]),
+            )
+    except (KeyError, TypeError, ValueError):
+        pass
+    return None, None, None
+
 
 def _lookup_round_odds(home: str, away: str):
     """Returnerar (odds_entries, streck_dict) från current_round om tillgängligt."""
@@ -179,8 +197,9 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
 
                     fallback_probs = None
                     if odds_entries:
-                        e = odds_entries[0]
-                        fallback_probs = odds_to_fair_probs(e.home, e.draw, e.away)
+                        o1, ox, o2 = _safe_odds_values(odds_entries[0])
+                        if o1 is not None:
+                            fallback_probs = odds_to_fair_probs(o1, ox, o2)
 
                     if fallback_probs is not None:
                         all_probs.append(fallback_probs)
@@ -221,10 +240,9 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
                 streck_1_val = streck_x_val = streck_2_val = None
 
                 if odds_entries:
-                    e = odds_entries[0]
-                    odds_1_val = e.home
-                    odds_x_val = e.draw
-                    odds_2_val = e.away
+                    odds_1_val, odds_x_val, odds_2_val = _safe_odds_values(
+                        odds_entries[0]
+                    )
 
                 if streck_dict:
                     streck_1_val = streck_dict.get("1")

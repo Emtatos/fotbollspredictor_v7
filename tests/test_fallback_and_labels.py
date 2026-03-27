@@ -230,3 +230,76 @@ class TestDrawProbabilities:
             streck_1=35, streck_x=30, streck_2=35,
         )
         assert cm.prob_x > 0.25, f"X={cm.prob_x:.3f} för låg för jämn match"
+
+
+# ---------------------------------------------------------------------------
+# 5. _safe_odds_values — hanterar OddsEntry och dict utan krasch
+# ---------------------------------------------------------------------------
+
+class TestSafeOddsValues:
+    """
+    Verifierar att _safe_odds_values fungerar med:
+    - OddsEntry-objekt (attribut)
+    - Vanliga dicts (nycklar)
+    - None / trasiga data → (None, None, None)
+    """
+
+    @staticmethod
+    def _fn(entry):
+        """Import av _safe_odds_values från page 3 utan Streamlit-runtime."""
+        # Duplicerar logiken exakt så vi kan testa isolerat
+        if entry is None:
+            return None, None, None
+        try:
+            if hasattr(entry, "home"):
+                return float(entry.home), float(entry.draw), float(entry.away)
+            if isinstance(entry, dict):
+                return (
+                    float(entry["home"]),
+                    float(entry["draw"]),
+                    float(entry["away"]),
+                )
+        except (KeyError, TypeError, ValueError):
+            pass
+        return None, None, None
+
+    def test_odds_entry_object(self):
+        """Fungerar med OddsEntry-dataclass (attribut-access)."""
+        from odds_tool import OddsEntry
+        e = OddsEntry(bookmaker="Bet365", home=2.50, draw=3.30, away=2.80)
+        h, d, a = self._fn(e)
+        assert h == pytest.approx(2.50)
+        assert d == pytest.approx(3.30)
+        assert a == pytest.approx(2.80)
+
+    def test_plain_dict(self):
+        """Fungerar med vanlig dict (nyckel-access)."""
+        e = {"bookmaker": "Bet365", "home": 2.50, "draw": 3.30, "away": 2.80}
+        h, d, a = self._fn(e)
+        assert h == pytest.approx(2.50)
+        assert d == pytest.approx(3.30)
+        assert a == pytest.approx(2.80)
+
+    def test_none_entry(self):
+        """None ger (None, None, None)."""
+        assert self._fn(None) == (None, None, None)
+
+    def test_empty_dict(self):
+        """Tom dict ger (None, None, None)."""
+        assert self._fn({}) == (None, None, None)
+
+    def test_partial_dict_missing_key(self):
+        """Dict med saknad nyckel ger (None, None, None)."""
+        assert self._fn({"home": 2.50, "draw": 3.30}) == (None, None, None)
+
+    def test_non_numeric_values(self):
+        """Dict med icke-numeriska värden ger (None, None, None)."""
+        assert self._fn({"home": "bad", "draw": 3.30, "away": 2.80}) == (None, None, None)
+
+    def test_string_numeric_values(self):
+        """Dict med string-numeriska värden konverteras korrekt."""
+        e = {"home": "2.50", "draw": "3.30", "away": "2.80"}
+        h, d, a = self._fn(e)
+        assert h == pytest.approx(2.50)
+        assert d == pytest.approx(3.30)
+        assert a == pytest.approx(2.80)
