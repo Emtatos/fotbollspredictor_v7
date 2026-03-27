@@ -147,12 +147,22 @@ def parse_coupon_image(
     filename: str = "coupon.png",
     api_key: Optional[str] = None,
     model: str = "gpt-4o-mini",
+    canonical_teams: Optional[set] = None,
+    use_pipeline: bool = False,
 ) -> CouponExtractionResult:
     """
     Tolkar en kupongbild och extraherar matcher, streck och odds.
 
-    Anvander OpenAI Vision API for att lasa bilden och returnera
-    strukturerad data.
+    Kan anvanda den forbattrade scannerpipelinen (scanner_pipeline.py) via
+    use_pipeline=True. Pipelinen inkluderar:
+    - Bildforbehandling (kontrast, skalning, skarpning)
+    - Forbattrad AI-prompt for radvis extraktion
+    - Faltvis parsning och validering
+    - Canonical team mapping med fuzzy-matchning
+    - Confidence/uncertainty per rad och falt
+
+    Legacy-parsern (use_pipeline=False) ar standard tills pipelinen ar
+    verifierad pa riktiga kupongbilder.
 
     Parametrar
     ----------
@@ -164,11 +174,52 @@ def parse_coupon_image(
         OpenAI API-nyckel. Om None, forsoks fran miljovariabler.
     model : str
         OpenAI-modell att anvanda. Standard: gpt-4o-mini.
+    canonical_teams : set, optional
+        Mangd av kanda kanoniska lagnamn for team mapping.
+    use_pipeline : bool
+        Om True, anvand den forbattrade pipelinen. Standard: False (legacy).
 
     Returnerar
     ----------
     CouponExtractionResult med tolkade rader och statistik.
     """
+    if use_pipeline:
+        return _parse_with_pipeline(
+            image_bytes, filename, api_key, model, canonical_teams
+        )
+    return _parse_legacy(image_bytes, filename, api_key, model)
+
+
+def _parse_with_pipeline(
+    image_bytes: bytes,
+    filename: str,
+    api_key: Optional[str],
+    model: str,
+    canonical_teams: Optional[set],
+) -> CouponExtractionResult:
+    """Anvander den nya scannerpipelinen."""
+    from scanner_pipeline import (
+        run_scanner_pipeline,
+        scanner_result_to_extraction_result,
+    )
+
+    scanner_result = run_scanner_pipeline(
+        image_bytes=image_bytes,
+        filename=filename,
+        api_key=api_key,
+        model=model,
+        canonical_teams=canonical_teams,
+    )
+    return scanner_result_to_extraction_result(scanner_result)
+
+
+def _parse_legacy(
+    image_bytes: bytes,
+    filename: str,
+    api_key: Optional[str],
+    model: str,
+) -> CouponExtractionResult:
+    """Legacy-parser (utan pipeline) for bakatkompabilitet."""
     import os
 
     if api_key is None:
