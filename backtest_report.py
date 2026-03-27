@@ -226,28 +226,54 @@ def compute_trust_scores_for_df(df_test: pd.DataFrame, df_train: pd.DataFrame) -
     return trust_results
 
 
+def select_halfguards_gain(y_proba: np.ndarray, n_half: int) -> np.ndarray:
+    """Select half-guard indices using gain-based ranking (current production logic).
+
+    Ranks by: (-gain, -top2, index) where gain = second_best probability.
+    """
+    n_matches = len(y_proba)
+    sorted_desc = np.sort(y_proba, axis=1)[:, ::-1]
+    gains = sorted_desc[:, 1]
+    top2s = sorted_desc[:, 0] + sorted_desc[:, 1]
+    order = np.lexsort((np.arange(n_matches), -top2s, -gains))
+    return order[:n_half]
+
+
+def select_halfguards_entropy(y_proba: np.ndarray, entropy_values: np.ndarray,
+                              n_half: int) -> np.ndarray:
+    """Select half-guard indices using entropy-based ranking (old logic).
+
+    Picks the *n_half* matches with the highest normalised entropy.
+    """
+    order = np.argsort(entropy_values)[::-1]
+    return order[:n_half]
+
+
 def compute_block_metrics(
     y_true: np.ndarray,
     y_proba: np.ndarray,
     pred_top1: np.ndarray,
     entropy_values: np.ndarray,
     n_half: int,
-    league_codes: Optional[np.ndarray] = None
+    league_codes: Optional[np.ndarray] = None,
+    selection_mode: str = "gain",
 ) -> Dict:
-    """Compute all metrics for a test block."""
+    """Compute all metrics for a test block.
+
+    Args:
+        selection_mode: "gain" (default, production) or "entropy" (old baseline).
+    """
     n_matches = len(y_true)
     
     # Top-1 accuracy
     accuracy_top1 = accuracy_score(y_true, pred_top1)
     
-    # Select half-guards by highest gain (second_best probability)
+    # Select half-guards
     if n_half > 0:
-        sorted_desc = np.sort(y_proba, axis=1)[:, ::-1]
-        gains = sorted_desc[:, 1]  # second_best for each match
-        top2s = sorted_desc[:, 0] + sorted_desc[:, 1]
-        # Sort by (-gain, -top2, index) to match ui_utils logic
-        order = np.lexsort((np.arange(n_matches), -top2s, -gains))
-        half_guard_indices = order[:n_half]
+        if selection_mode == "entropy":
+            half_guard_indices = select_halfguards_entropy(y_proba, entropy_values, n_half)
+        else:
+            half_guard_indices = select_halfguards_gain(y_proba, n_half)
     else:
         half_guard_indices = np.array([])
     
