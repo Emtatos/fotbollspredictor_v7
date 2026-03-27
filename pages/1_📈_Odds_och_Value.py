@@ -734,7 +734,7 @@ if odds_mode == "Aktuell omgång (importera)":
                     hg_rows.append({
                         "Match": f"{cm.home_team} vs {cm.away_team}",
                         "Tips": sign,
-                        "Entropy": f"{cm.entropy:.3f}",
+                        "Gain": f"{sorted(cm.probs, reverse=True)[1]:.3f}",
                         "1": f"{cm.prob_1:.1%}",
                         "X": f"{cm.prob_x:.1%}",
                         "2": f"{cm.prob_2:.1%}",
@@ -751,6 +751,10 @@ if odds_mode == "Aktuell omgång (importera)":
                     sources_used.append("streck (15%)")
                 if sources_used:
                     st.caption(f"Halvgarderingar baserade på: {', '.join(sources_used)}")
+                st.caption(
+                    "Urval av halvgarderingar styrs av **gain** "
+                    "(näst högsta sannolikheten = marginalnytta av en halvgardering)."
+                )
 
             st.divider()
 
@@ -1285,7 +1289,7 @@ elif odds_mode == "Kupongbild (screenshot)":
                                 hg_rows.append({
                                     "Match": f"{cm.home_team} vs {cm.away_team}",
                                     "Tips": sign,
-                                    "Entropy": f"{cm.entropy:.3f}",
+                                    "Gain": f"{sorted(cm.probs, reverse=True)[1]:.3f}",
                                     "1": f"{cm.prob_1:.1%}",
                                     "X": f"{cm.prob_x:.1%}",
                                     "2": f"{cm.prob_2:.1%}",
@@ -1301,6 +1305,10 @@ elif odds_mode == "Kupongbild (screenshot)":
                                 sources_used.append("streck (15%)")
                             if sources_used:
                                 st.caption(f"Halvgarderingar baserade på: {', '.join(sources_used)}")
+                            st.caption(
+                                "Urval av halvgarderingar styrs av **gain** "
+                                "(näst högsta sannolikheten = marginalnytta av en halvgardering)."
+                            )
 
                         st.divider()
 

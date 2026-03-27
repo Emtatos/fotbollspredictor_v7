@@ -3,6 +3,10 @@ Sida: Flera Matcher — batchprediktion med XGBoost.
 
 Användaren klistrar in flera matcher (en per rad) och får sannolikheter,
 halvgarderingsförslag och en sammanslagen tipsrad.
+
+Om modellen saknar data för ett lag (t.ex. lag utanför E0–E2) men odds/streck
+finns tillgängliga från en tidigare import (current_round), används dessa som
+fallback så att matchen inte visas som N/A utan förklaring.
 """
 
 import streamlit as st
@@ -23,8 +27,9 @@ from ui_utils import (
     parse_match_input_with_errors,
     calculate_match_entropy,
 )
-from combined_probability import build_combined_match
+from combined_probability import build_combined_match, odds_to_fair_probs
 from utils import set_canonical_teams, get_canonical_teams
+from matchday_import import _make_key
 
 # Ladda modell och data via gemensam helper
 model, df_features, model_metadata, all_teams, MODEL_FILENAME = get_model_and_data()
@@ -34,7 +39,11 @@ if not ensure_model_ready(model, df_features, all_teams):
     st.stop()
 
 st.header("Flera matcher — modellprediktion")
-st.caption("Använder den tränade modellen. Se Odds & Value-fliken för oddsanalys.")
+st.caption(
+    "Använder den tränade modellen. "
+    "Om ett lag saknas i modellens data men odds/streck finns från "
+    "senaste import visas en odds-baserad fallback istället för N/A."
+)
 st.markdown("Skriv in matcher, en per rad. Format: `Hemmalag - Bortalag`")
 
 # --- Importera från senaste scanning (current_round) ---
@@ -75,6 +84,50 @@ match_input = st.text_area(
 
 col1, col2 = st.columns(2)
 
+
+# ---- Hjälpfunktion: hämta odds/streck från current_round ----
+
+def _safe_odds_values(entry):
+    """Extrahera (home, draw, away) från OddsEntry-objekt eller dict utan krasch."""
+    if entry is None:
+        return None, None, None
+    try:
+        if hasattr(entry, "home"):
+            return float(entry.home), float(entry.draw), float(entry.away)
+        if isinstance(entry, dict):
+            return (
+                float(entry["home"]),
+                float(entry["draw"]),
+                float(entry["away"]),
+            )
+    except (KeyError, TypeError, ValueError):
+        pass
+    return None, None, None
+
+
+def _lookup_round_odds(home: str, away: str):
+    """Returnerar (odds_entries, streck_dict) från current_round om tillgängligt."""
+    cr = st.session_state.get("current_round")
+    if not cr:
+        return None, None
+    odds_by_key = cr.get("odds") or {}
+    streck_by_key = cr.get("streck") or {}
+    key = _make_key(home, away)
+    odds_entries = odds_by_key.get(key)
+    streck_dict = streck_by_key.get(key)
+    # Fallback: case-insensitive
+    if odds_entries is None:
+        for k, v in odds_by_key.items():
+            if k.lower() == key.lower():
+                odds_entries = v
+                break
+    if streck_dict is None:
+        for k, v in streck_by_key.items():
+            if k.lower() == key.lower():
+                streck_dict = v
+                break
+    return odds_entries, streck_dict
+
 with col1:
     num_halfguards = st.number_input(
         "Antal halvgarderingar:",
@@ -113,28 +166,17 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
 
             results = []
             all_probs = []
+            data_sources = []  # "modell", "odds (fallback)", "N/A"
 
             for home, away in matches:
                 result = predict_match(model, home, away, df_features)
 
-                if result is None:
-                    results.append({
-                        "Match": f"{home} - {away}",
-                        "1": "N/A",
-                        "X": "N/A",
-                        "2": "N/A",
-                        "Entropy": "N/A",
-                        "Trust": "N/A",
-                        "Tips": "?",
-                        "HALV": ""
-                    })
-                    all_probs.append(None)
-                else:
+                if result is not None:
                     probs, stats = result
                     all_probs.append(probs)
+                    data_sources.append("modell")
 
                     sign = ['1', 'X', '2'][np.argmax(probs)]
-                    entropy = calculate_match_entropy(probs)
                     trust_lbl = stats.get('trust_label', 'N/A')
                     if trust_lbl == "LOW":
                         trust_lbl = "LOW (varning)"
@@ -144,31 +186,90 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
                         "1": f"{probs[0]:.1%}",
                         "X": f"{probs[1]:.1%}",
                         "2": f"{probs[2]:.1%}",
-                        "Entropy": f"{entropy:.2f}" if entropy is not None else "N/A",
+                        "Källa": "modell",
                         "Trust": trust_lbl,
                         "Tips": sign,
                         "HALV": ""
                     })
+                else:
+                    # --- Fallback: odds/streck från current_round ---
+                    odds_entries, streck_dict = _lookup_round_odds(home, away)
 
-            # Bygg kombinerade sannolikheter för alla matcher
-            # (Flera Matcher har bara modell-probs, inga odds/streck)
+                    fallback_probs = None
+                    if odds_entries:
+                        o1, ox, o2 = _safe_odds_values(odds_entries[0])
+                        if o1 is not None:
+                            fallback_probs = odds_to_fair_probs(o1, ox, o2)
+
+                    if fallback_probs is not None:
+                        all_probs.append(fallback_probs)
+                        data_sources.append("odds (fallback)")
+
+                        sign = ['1', 'X', '2'][np.argmax(fallback_probs)]
+
+                        results.append({
+                            "Match": f"{home} - {away}",
+                            "1": f"{fallback_probs[0]:.1%}",
+                            "X": f"{fallback_probs[1]:.1%}",
+                            "2": f"{fallback_probs[2]:.1%}",
+                            "Källa": "odds (fallback)",
+                            "Trust": "—",
+                            "Tips": sign,
+                            "HALV": ""
+                        })
+                    else:
+                        all_probs.append(None)
+                        data_sources.append("N/A")
+                        results.append({
+                            "Match": f"{home} - {away}",
+                            "1": "N/A",
+                            "X": "N/A",
+                            "2": "N/A",
+                            "Källa": "saknas",
+                            "Trust": "N/A",
+                            "Tips": "?",
+                            "HALV": ""
+                        })
+
+            # Bygg kombinerade sannolikheter med odds/streck från current_round
             combined_matches = []
             for i, (home, away) in enumerate(matches):
+                odds_entries, streck_dict = _lookup_round_odds(home, away)
+
+                odds_1_val = odds_x_val = odds_2_val = None
+                streck_1_val = streck_x_val = streck_2_val = None
+
+                if odds_entries:
+                    odds_1_val, odds_x_val, odds_2_val = _safe_odds_values(
+                        odds_entries[0]
+                    )
+
+                if streck_dict:
+                    streck_1_val = streck_dict.get("1")
+                    streck_x_val = streck_dict.get("X")
+                    streck_2_val = streck_dict.get("2")
+
                 cm = build_combined_match(
                     home_team=home,
                     away_team=away,
+                    odds_1=odds_1_val,
+                    odds_x=odds_x_val,
+                    odds_2=odds_2_val,
                     model_probs=all_probs[i],
+                    streck_1=streck_1_val,
+                    streck_x=streck_x_val,
+                    streck_2=streck_2_val,
                 )
                 combined_matches.append(cm)
 
             # Applicera halvgarderingar
             if num_halfguards > 0:
-                # Fallback: Flera Matcher har bara modell → använd enbart modell
-                guard_indices = pick_half_guards(all_probs, num_halfguards)
+                # Använd kombinerade sannolikheter för halvgardering
+                guard_indices = pick_half_guards_combined(combined_matches, num_halfguards)
                 for idx in guard_indices:
-                    if all_probs[idx] is not None:
-                        results[idx]["Tips"] = get_halfguard_sign(all_probs[idx])
-                        results[idx]["HALV"] = "HALV"
+                    cm = combined_matches[idx]
+                    results[idx]["Tips"] = get_halfguard_sign_combined(cm)
+                    results[idx]["HALV"] = "HALV"
 
                 # Visa vilka signaler som användes
                 sources_used = []
@@ -180,6 +281,26 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
                     sources_used.append("streck (15%)")
                 if sources_used:
                     st.caption(f"Halvgarderingar baserade på: {', '.join(sources_used)}")
+                st.caption(
+                    "Urval av halvgarderingar styrs av **gain** "
+                    "(näst högsta sannolikheten = marginalnytta av en halvgardering)."
+                )
+
+            # Visa fallback-information om den användes
+            n_fallback = sum(1 for ds in data_sources if ds == "odds (fallback)")
+            n_missing = sum(1 for ds in data_sources if ds == "N/A")
+            if n_fallback > 0 or n_missing > 0:
+                parts = []
+                if n_fallback > 0:
+                    parts.append(
+                        f"{n_fallback} match(er) saknar modelldata — "
+                        f"odds-baserad fallback används"
+                    )
+                if n_missing > 0:
+                    parts.append(
+                        f"{n_missing} match(er) saknar all data (varken modell eller odds)"
+                    )
+                st.warning(". ".join(parts) + ".")
 
             df_results = pd.DataFrame(results)
             st.dataframe(df_results, use_container_width=True, hide_index=True)
