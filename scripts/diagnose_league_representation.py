@@ -768,6 +768,64 @@ def build_x_calibration_table(predictions: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+OVERALL_DIRECT_COMPARISONS = (
+    ("league_ordinal", "league_none", "None"),
+    ("league_onehot", "league_none", "None"),
+    ("league_onehot", "league_ordinal", "Ordinal"),
+)
+
+OVERALL_DIRECT_COLUMNS = (
+    "FeatureSet",
+    "Candidate",
+    "Reference",
+    "N",
+    "Delta_LogLoss",
+    "Delta_LogLoss_CI95_L",
+    "Delta_LogLoss_CI95_U",
+    "Delta_Brier",
+    "Delta_Brier_CI95_L",
+    "Delta_Brier_CI95_U",
+)
+
+
+def build_overall_direct_table(overall_table: pd.DataFrame) -> pd.DataFrame:
+    """Reshape the already computed overall deltas into decision-bearing rows.
+
+    No metric or confidence interval is recomputed here; every value comes from
+    the same bootstrap resamples used for the overall table.
+    """
+    by_variant = overall_table.set_index("Variant")
+    rows: list[dict] = []
+
+    for feature_set in FEATURE_SETS:
+        for candidate, reference, suffix in OVERALL_DIRECT_COMPARISONS:
+            source = by_variant.loc[f"{feature_set}/{candidate}"]
+            rows.append(
+                {
+                    "FeatureSet": feature_set,
+                    "Candidate": candidate,
+                    "Reference": reference,
+                    "N": int(source["N"]),
+                    "Delta_LogLoss": float(source[f"Delta_LogLoss_vs_{suffix}"]),
+                    "Delta_LogLoss_CI95_L": float(
+                        source[f"Delta_LogLoss_vs_{suffix}_CI95_L"]
+                    ),
+                    "Delta_LogLoss_CI95_U": float(
+                        source[f"Delta_LogLoss_vs_{suffix}_CI95_U"]
+                    ),
+                    "Delta_Brier": float(source[f"Delta_Brier_vs_{suffix}"]),
+                    "Delta_Brier_CI95_L": float(
+                        source[f"Delta_Brier_vs_{suffix}_CI95_L"]
+                    ),
+                    "Delta_Brier_CI95_U": float(
+                        source[f"Delta_Brier_vs_{suffix}_CI95_U"]
+                    ),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
 def _fmt(value: object, digits: int = 4) -> str:
     try:
         number = float(value)
@@ -778,13 +836,20 @@ def _fmt(value: object, digits: int = 4) -> str:
     return f"{number:.{digits}f}"
 
 
-def markdown_table(df: pd.DataFrame, columns: Sequence[str]) -> str:
+def markdown_table(
+    df: pd.DataFrame,
+    columns: Sequence[str],
+    *,
+    digits: int = 4,
+) -> str:
     header = "| " + " | ".join(columns) + " |"
     separator = "| " + " | ".join(["---"] * len(columns)) + " |"
     lines = [header, separator]
 
     integer_columns = {"Fold", "Train_N", "Test_N", "Paired_N", "N"}
     text_columns = {
+        "Candidate",
+        "Reference",
         "League",
         "Season",
         "Variant",
@@ -801,7 +866,7 @@ def markdown_table(df: pd.DataFrame, columns: Sequence[str]) -> str:
             elif column in text_columns:
                 values.append(str(row[column]))
             else:
-                values.append(_fmt(row[column]))
+                values.append(_fmt(row[column], digits))
         lines.append("| " + " | ".join(values) + " |")
 
     return "\n".join(lines)
@@ -889,6 +954,7 @@ def render_report(
         "Delta_Brier_vs_Ordinal_CI95_L",
         "Delta_Brier_vs_Ordinal_CI95_U",
     ]
+    overall_direct = build_overall_direct_table(overall_table)
     direct = league_table[
         league_table["LeagueRepresentation"].isin(
             ["league_ordinal", "league_onehot"]
@@ -930,6 +996,27 @@ def render_report(
         "## Overall metrics",
         "",
         markdown_table(overall_table[metric_columns], metric_columns),
+        "",
+        "## Overall direct League-representation comparisons",
+        "",
+        "Negative delta means the candidate is better than the reference. These "
+        "overall paired comparisons are the decision basis for League "
+        "representation.",
+        "",
+        markdown_table(
+            overall_direct[list(OVERALL_DIRECT_COLUMNS)],
+            list(OVERALL_DIRECT_COLUMNS),
+            digits=6,
+        ),
+        "",
+        "### Overall conclusion",
+        "",
+        "- No active League representation significantly improves on "
+        "`league_none` overall.",
+        "- One-hot is not significantly different from ordinal overall.",
+        "- Every relevant overall paired 95% confidence interval overlaps 0.",
+        "- No League representation can be declared a winner.",
+        "- No production change is recommended based on this diagnostic.",
         "",
         "## Per-fold metrics",
         "",
@@ -987,6 +1074,9 @@ def render_report(
             "- `X_top2_rate` counts ties for second place as top-2.",
             "- Small third-decimal differences are expected and must not trigger "
             "a production change without paired evidence.",
+            "- Per-league and per-season confidence intervals are exploratory and "
+            "are not adjusted for multiple comparisons. An isolated subgroup "
+            "result must not override the overall paired comparison.",
             "",
         ]
     )
@@ -995,6 +1085,7 @@ def render_report(
 
 def save_outputs(
     report: str,
+    overall_table: pd.DataFrame,
     fold_table: pd.DataFrame,
     league_table: pd.DataFrame,
     season_table: pd.DataFrame,
@@ -1007,15 +1098,17 @@ def save_outputs(
 
     outputs = (
         report_path,
+        report_path.with_name(report_path.stem + "_OVERALL.csv"),
         report_path.with_name(report_path.stem + "_FOLD.csv"),
         report_path.with_name(report_path.stem + "_LEAGUE.csv"),
         report_path.with_name(report_path.stem + "_SEASON.csv"),
         report_path.with_name(report_path.stem + "_X_CALIBRATION.csv"),
     )
-    fold_table.to_csv(outputs[1], index=False)
-    league_table.to_csv(outputs[2], index=False)
-    season_table.to_csv(outputs[3], index=False)
-    calibration_table.to_csv(outputs[4], index=False)
+    overall_table.to_csv(outputs[1], index=False)
+    fold_table.to_csv(outputs[2], index=False)
+    league_table.to_csv(outputs[3], index=False)
+    season_table.to_csv(outputs[4], index=False)
+    calibration_table.to_csv(outputs[5], index=False)
     return outputs
 
 
@@ -1105,6 +1198,7 @@ def main() -> int:
     )
     outputs = save_outputs(
         report,
+        overall_table,
         fold_table,
         league_table,
         season_table,

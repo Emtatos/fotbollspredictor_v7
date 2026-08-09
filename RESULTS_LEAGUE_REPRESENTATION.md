@@ -27,6 +27,27 @@
 | with_odds/league_ordinal | 2978 | 0.4846 | 1.0337 | 0.6208 | 0.5625 | 0.2699 | 0.2545 | 0.1902 | 0.0086 | 0.0054 |
 | with_odds/league_onehot | 2978 | 0.4805 | 1.0337 | 0.6209 | 0.5668 | 0.2701 | 0.2545 | 0.1902 | 0.0086 | 0.0054 |
 
+## Overall direct League-representation comparisons
+
+Negative delta means the candidate is better than the reference. These overall paired comparisons are the decision basis for League representation.
+
+| FeatureSet | Candidate | Reference | N | Delta_LogLoss | Delta_LogLoss_CI95_L | Delta_LogLoss_CI95_U | Delta_Brier | Delta_Brier_CI95_L | Delta_Brier_CI95_U |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| base | league_ordinal | league_none | 2978 | 0.000134 | -0.000157 | 0.000421 | 0.000110 | -0.000096 | 0.000312 |
+| base | league_onehot | league_none | 2978 | -0.000286 | -0.001142 | 0.000558 | -0.000198 | -0.000776 | 0.000381 |
+| base | league_onehot | league_ordinal | 2978 | -0.000420 | -0.001235 | 0.000343 | -0.000308 | -0.000862 | 0.000209 |
+| with_odds | league_ordinal | league_none | 2978 | -0.000039 | -0.000160 | 0.000081 | -0.000026 | -0.000107 | 0.000053 |
+| with_odds | league_onehot | league_none | 2978 | -0.000043 | -0.000690 | 0.000576 | 0.000032 | -0.000407 | 0.000447 |
+| with_odds | league_onehot | league_ordinal | 2978 | -0.000004 | -0.000631 | 0.000609 | 0.000058 | -0.000370 | 0.000458 |
+
+### Overall conclusion
+
+- No active League representation significantly improves on `league_none` overall.
+- One-hot is not significantly different from ordinal overall.
+- Every relevant overall paired 95% confidence interval overlaps 0.
+- No League representation can be declared a winner.
+- No production change is recommended based on this diagnostic.
+
 ## Per-fold metrics
 
 | Fold | Train_N | Test_N | Paired_N | Variant | N | Accuracy | LogLoss | Brier | X_top2_rate | X_mean_prob | X_actual_rate | X_brier | Delta_LogLoss_vs_Odds | Delta_Brier_vs_Odds |
@@ -231,3 +252,4 @@ Per-league p_X calibration is saved in the generated `_X_CALIBRATION.csv` artifa
 - Do not declare a representation winner when LogLoss/Brier conflict or paired confidence intervals overlap 0.
 - `X_top2_rate` counts ties for second place as top-2.
 - Small third-decimal differences are expected and must not trigger a production change without paired evidence.
+- Per-league and per-season confidence intervals are exploratory and are not adjusted for multiple comparisons. An isolated subgroup result must not override the overall paired comparison.

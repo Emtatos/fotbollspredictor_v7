@@ -12,13 +12,18 @@ import scripts.diagnose_league_representation as module_under_test
 from scripts.diagnose_league_representation import (
     ALL_VARIANT_LABELS,
     ONEHOT_COLUMNS,
+    OVERALL_DIRECT_COLUMNS,
     VariantSpec,
     apply_league_representation,
+    build_fold_table,
     build_group_table,
+    build_overall_direct_table,
     build_x_calibration_table,
     feature_columns_for,
     metric_row,
     probability_columns,
+    render_report,
+    save_outputs,
     validate_prediction_frame,
     x_top2_mask,
 )
@@ -216,6 +221,163 @@ def test_x_calibration_has_fixed_bins_for_every_variant_and_scope():
 
     counts = overall.groupby("Variant")["N"].sum()
     assert (counts == len(predictions)).all()
+
+
+def _report_tables(bootstrap: int = 50, seed: int = 7):
+    predictions = _prediction_fixture()
+    return predictions, {
+        "overall_table": build_group_table(
+            predictions, [], bootstrap=bootstrap, seed=seed
+        ),
+        "fold_table": build_fold_table(
+            predictions, bootstrap=bootstrap, seed=seed
+        ),
+        "league_table": build_group_table(
+            predictions, ["League"], bootstrap=bootstrap, seed=seed
+        ),
+        "season_table": build_group_table(
+            predictions, ["League", "Season"], bootstrap=bootstrap, seed=seed
+        ),
+        "calibration_table": build_x_calibration_table(predictions),
+    }
+
+
+def test_overall_direct_table_covers_both_feature_sets_and_comparisons():
+    _, tables = _report_tables()
+    direct = build_overall_direct_table(tables["overall_table"])
+
+    assert set(direct["FeatureSet"]) == {"base", "with_odds"}
+    for feature_set in ("base", "with_odds"):
+        rows = direct[direct["FeatureSet"] == feature_set]
+        pairs = set(zip(rows["Candidate"], rows["Reference"]))
+        assert pairs == {
+            ("league_ordinal", "league_none"),
+            ("league_onehot", "league_none"),
+            ("league_onehot", "league_ordinal"),
+        }
+
+    assert list(direct.columns) == list(OVERALL_DIRECT_COLUMNS)
+    assert direct[list(OVERALL_DIRECT_COLUMNS)].notna().all().all()
+
+
+def test_overall_direct_values_come_from_the_overall_table():
+    _, tables = _report_tables()
+    overall = tables["overall_table"].set_index("Variant")
+    direct = build_overall_direct_table(tables["overall_table"])
+
+    row = direct[
+        (direct["FeatureSet"] == "base")
+        & (direct["Candidate"] == "league_onehot")
+        & (direct["Reference"] == "league_ordinal")
+    ].iloc[0]
+    source = overall.loc["base/league_onehot"]
+
+    assert row["Delta_LogLoss"] == pytest.approx(
+        source["Delta_LogLoss_vs_Ordinal"]
+    )
+    assert row["Delta_LogLoss_CI95_L"] == pytest.approx(
+        source["Delta_LogLoss_vs_Ordinal_CI95_L"]
+    )
+    assert row["Delta_LogLoss_CI95_U"] == pytest.approx(
+        source["Delta_LogLoss_vs_Ordinal_CI95_U"]
+    )
+    assert row["Delta_Brier"] == pytest.approx(source["Delta_Brier_vs_Ordinal"])
+    assert row["Delta_Brier_CI95_L"] == pytest.approx(
+        source["Delta_Brier_vs_Ordinal_CI95_L"]
+    )
+    assert row["Delta_Brier_CI95_U"] == pytest.approx(
+        source["Delta_Brier_vs_Ordinal_CI95_U"]
+    )
+
+
+def test_report_contains_overall_direct_section_conclusion_and_guardrail():
+    predictions, tables = _report_tables()
+    report = render_report(
+        predictions,
+        **tables,
+        bootstrap=50,
+        strict_sample=True,
+    )
+
+    assert "Overall direct League-representation comparisons" in report
+    for column in OVERALL_DIRECT_COLUMNS:
+        assert column in report
+
+    section = report.split(
+        "## Overall direct League-representation comparisons"
+    )[1].split("## Per-fold metrics")[0]
+    for feature_set in ("base", "with_odds"):
+        for candidate, reference in (
+            ("league_ordinal", "league_none"),
+            ("league_onehot", "league_none"),
+            ("league_onehot", "league_ordinal"),
+        ):
+            assert (
+                f"| {feature_set} | {candidate} | {reference} |" in section
+            )
+
+    assert (
+        "No active League representation significantly improves on "
+        "`league_none` overall." in section
+    )
+    assert (
+        "One-hot is not significantly different from ordinal overall."
+        in section
+    )
+    assert (
+        "Every relevant overall paired 95% confidence interval overlaps 0."
+        in section
+    )
+    assert "No League representation can be declared a winner." in section
+    assert (
+        "No production change is recommended based on this diagnostic."
+        in section
+    )
+
+    assert (
+        "Per-league and per-season confidence intervals are exploratory and "
+        "are not adjusted for multiple comparisons. An isolated subgroup "
+        "result must not override the overall paired comparison." in report
+    )
+
+
+def test_save_outputs_writes_overall_csv_with_all_sources_and_deltas(tmp_path):
+    _, tables = _report_tables()
+    outputs = save_outputs(
+        "report",
+        tables["overall_table"],
+        tables["fold_table"],
+        tables["league_table"],
+        tables["season_table"],
+        tables["calibration_table"],
+        report_path=tmp_path / "RESULTS_LEAGUE_REPRESENTATION.md",
+    )
+
+    overall_path = tmp_path / "RESULTS_LEAGUE_REPRESENTATION_OVERALL.csv"
+    assert overall_path in outputs
+    assert overall_path.exists()
+
+    saved = pd.read_csv(overall_path)
+    assert set(saved["Variant"]) == set(ALL_VARIANT_LABELS)
+    for column in (
+        "FeatureSet",
+        "LeagueRepresentation",
+        "N",
+        "Accuracy",
+        "LogLoss",
+        "Brier",
+        "X_top2_rate",
+        "X_mean_prob",
+        "X_actual_rate",
+        "X_brier",
+    ):
+        assert column in saved.columns
+    for reference in ("Odds", "None", "Ordinal"):
+        for metric in ("LogLoss", "Brier"):
+            assert f"Delta_{metric}_vs_{reference}" in saved.columns
+            assert f"Delta_{metric}_vs_{reference}_CI95_L" in saved.columns
+            assert f"Delta_{metric}_vs_{reference}_CI95_U" in saved.columns
+
 
 def test_main_allows_refresh_while_retaining_strict_sample_validation(
     monkeypatch, tmp_path
