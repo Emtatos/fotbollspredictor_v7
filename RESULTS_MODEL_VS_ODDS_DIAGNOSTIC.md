@@ -14,6 +14,14 @@
 - `Model+Odds` is separately trained inside every fold with `ALL_FEATURE_COLUMNS`.
 - Negative Delta_LogLoss/Brier_vs_Odds means the candidate is better than odds.
 
+## Known limitation — League encoding and production parity
+
+`FeatureBuilder` returns numeric `League` values `0.0–3.0`. Current production training and inference pass those numeric values through `encode_league()`, which only recognizes the string values `E0–E3`; the production League feature therefore collapses to the constant value `−1` and is functionally unused.
+
+This diagnostic decodes the numeric values back to `E0–E3` before the benchmark trainer encodes them to `0–3`. Consequently, the `Model` and `Model+Odds` variants in this report use an active ordinal League feature and are not exact production-parity measurements.
+
+The results should therefore be interpreted as a benchmark of the current feature set with an active League representation, not as a bit-for-bit evaluation of the currently deployed production model.
+
 ## Per-fold metrics and warm-up diagnostic
 
 | Fold | Train_N | Test_N | Paired_N | Variant | N | Accuracy | LogLoss | Brier | X_precision | X_recall | Delta_LogLoss_vs_Odds | Delta_Brier_vs_Odds |
