@@ -13,6 +13,7 @@ from combined_probability import DEFAULT_WEIGHTS, combine_probabilities
 from scripts.diagnose_production_blend import (
     CORE_VARIANTS,
     DEFAULT_MAX_DATE,
+    REFERENCE_CACHE_FILES,
     PRODUCTION_MODEL_WEIGHT,
     PRODUCTION_ODDS_WEIGHT,
     SWEEP_WEIGHTS,
@@ -231,6 +232,163 @@ def test_max_date_filter_keeps_fold_boundaries_identical_to_reference_window():
     ) in zip(reference_folds, frozen_folds):
         assert reference_train.tolist() == frozen_train.tolist()
         assert reference_test.tolist() == frozen_test.tolist()
+
+
+def test_freeze_does_not_reorder_same_date_rows():
+    """
+    freeze_reference_window() must only filter.
+
+    canonicalize_history() sorts with the unstable quicksort default, so a
+    second sort inside the freeze step would reorder same-date matches and
+    change the CalibratedClassifierCV(cv=3) calibration folds. The input is
+    deliberately unsorted with several matches per date, because quicksort on
+    already sorted input often preserves order and would hide the bug.
+    """
+    rng = np.random.default_rng(11)
+    dates = pd.date_range("2026-01-01", periods=40, freq="D").repeat(4)
+    frame = pd.DataFrame(
+        {
+            "Date": dates,
+            "League": ["E0", "E1", "E2", "E3"] * 40,
+            "FTR": ["H", "D", "A", "H"] * 40,
+            "MatchKey": [f"m{index:03d}" for index in range(len(dates))],
+        }
+    )
+    frame = frame.iloc[rng.permutation(len(frame))].reset_index(drop=True)
+
+    late = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-08-08", "2026-08-08", "2026-08-09"]),
+            "League": ["E0", "E1", "E2"],
+            "FTR": ["H", "D", "A"],
+            "MatchKey": ["late0", "late1", "late2"],
+        }
+    )
+    extended = pd.concat([frame, late], ignore_index=True)
+    extended = extended.iloc[rng.permutation(len(extended))].reset_index(
+        drop=True
+    )
+    reference = extended[extended["Date"] <= pd.Timestamp("2026-05-24")].copy()
+
+    frozen, metadata = freeze_reference_window(
+        extended,
+        max_date="2026-05-24",
+    )
+    assert metadata["excluded_post_max_date_N"] == 3
+
+    canonical_frozen = module_under_test.canonicalize_history(frozen)
+    canonical_reference = module_under_test.canonicalize_history(reference)
+
+    assert (
+        canonical_frozen["MatchKey"].tolist()
+        == canonical_reference["MatchKey"].tolist()
+    )
+    pd.testing.assert_frame_equal(canonical_frozen, canonical_reference)
+
+
+def test_reference_input_is_frozen_to_eight_files_in_exact_order(monkeypatch):
+    captured = {}
+
+    def fake_normalize(file_paths):
+        captured["paths"] = list(file_paths)
+        return pd.DataFrame({"Date": pd.to_datetime(["2025-01-16"])})
+
+    monkeypatch.setattr(module_under_test, "normalize_csv_data", fake_normalize)
+    monkeypatch.setattr(module_under_test, "create_features", lambda df: df)
+    monkeypatch.setattr(
+        module_under_test,
+        "reference_cache_paths",
+        lambda: [Path("data/cache") / name for name in REFERENCE_CACHE_FILES],
+    )
+
+    module_under_test.load_reference_data(refresh=False)
+
+    assert [path.name for path in captured["paths"]] == list(
+        REFERENCE_CACHE_FILES
+    )
+    assert list(REFERENCE_CACHE_FILES) == [
+        "E0_2425.csv",
+        "E1_2425.csv",
+        "E2_2425.csv",
+        "E3_2425.csv",
+        "E0_2526.csv",
+        "E1_2526.csv",
+        "E2_2526.csv",
+        "E3_2526.csv",
+    ]
+
+
+def test_reference_input_never_loads_season_2627(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for name in REFERENCE_CACHE_FILES:
+        (cache / name).write_text("x", encoding="utf-8")
+    for name in ("E0_2627.csv", "E1_2627.csv", "E2_2627.csv", "E3_2627.csv"):
+        (cache / name).write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(module_under_test, "CACHE_DIR", cache)
+    captured = {}
+
+    def fake_normalize(file_paths):
+        captured["paths"] = list(file_paths)
+        return pd.DataFrame({"Date": pd.to_datetime(["2025-01-16"])})
+
+    monkeypatch.setattr(module_under_test, "normalize_csv_data", fake_normalize)
+    monkeypatch.setattr(module_under_test, "create_features", lambda df: df)
+
+    module_under_test.load_reference_data(refresh=False)
+
+    names = [path.name for path in captured["paths"]]
+    assert names == list(REFERENCE_CACHE_FILES)
+    assert not any("2627" in name for name in names)
+
+
+def test_reference_loader_is_row_identical_to_direct_eight_file_build(
+    monkeypatch,
+):
+    """The loader must add nothing beyond the frozen files, row by row."""
+    frames = {
+        name: pd.DataFrame(
+            {
+                "Date": pd.to_datetime(["2025-01-16", "2025-01-17"]),
+                "MatchKey": [f"{name}-0", f"{name}-1"],
+            }
+        )
+        for name in REFERENCE_CACHE_FILES
+    }
+
+    def fake_normalize(file_paths):
+        return pd.concat(
+            [frames[Path(path).name] for path in file_paths],
+            ignore_index=True,
+        )
+
+    def fake_create_features(df):
+        out = df.copy()
+        out["Feature"] = np.arange(len(out), dtype=float)
+        return out
+
+    monkeypatch.setattr(module_under_test, "normalize_csv_data", fake_normalize)
+    monkeypatch.setattr(
+        module_under_test,
+        "create_features",
+        fake_create_features,
+    )
+    monkeypatch.setattr(
+        module_under_test,
+        "reference_cache_paths",
+        lambda: [Path("data/cache") / name for name in REFERENCE_CACHE_FILES],
+    )
+
+    loaded = module_under_test.load_reference_data(refresh=False)
+    direct = fake_create_features(
+        fake_normalize(
+            [Path("data/cache") / name for name in REFERENCE_CACHE_FILES]
+        )
+    )
+
+    assert loaded["MatchKey"].tolist() == direct["MatchKey"].tolist()
+    pd.testing.assert_frame_equal(loaded, direct)
 
 
 def test_run_diagnostic_requires_pre_frozen_metadata():
@@ -555,14 +713,14 @@ def test_main_allows_refresh_and_retains_strict_sample_validation(
     call_order = []
 
     monkeypatch.setattr(module_under_test, "parse_args", lambda: args)
-    def fake_load_data(refresh=False):
+    def fake_load_reference_data(*, refresh=False):
         call_order.append("load")
         return loaded if refresh else pd.DataFrame()
 
     monkeypatch.setattr(
         module_under_test,
-        "load_data",
-        fake_load_data,
+        "load_reference_data",
+        fake_load_reference_data,
     )
     monkeypatch.setattr(
         module_under_test,

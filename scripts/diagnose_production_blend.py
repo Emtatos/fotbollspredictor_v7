@@ -33,8 +33,14 @@ import pandas as pd
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from backtest_report import load_data, train_model
+from backtest_report import (
+    CACHE_DIR,
+    download_and_cache_data,
+    train_model,
+)
 from combined_probability import DEFAULT_WEIGHTS, combine_probabilities
+from data_processing import normalize_csv_data
+from feature_engineering import create_features
 from schema import CLASS_MAP, FEATURE_COLUMNS
 from scripts.diagnose_league_representation import (
     X_CALIBRATION_BINS,
@@ -55,6 +61,22 @@ logger = logging.getLogger(__name__)
 BASE_SHA = "75e3c3a011c6294f6727b49fd70b63d54750dc46"
 DEFAULT_MAX_DATE = "2026-05-24"
 CORE_VARIANTS = ("odds_only", "model_only", "production_blend")
+
+# Paritetsgaranti: exakt filuppsättning OCH exakt ordning från PR #43/#44.
+# normalize_csv_data() concatenar i inskickad ordning och FeatureBuilder
+# sorterar därefter instabilt på Date. Sortera INTE om denna lista.
+# Listan hör ihop med det frysta fönstret 2026-05-24 och ska endast ändras
+# som ett medvetet beslut när hela diagnostikfamiljen körs om på nytt fönster.
+REFERENCE_CACHE_FILES = (
+    "E0_2425.csv",
+    "E1_2425.csv",
+    "E2_2425.csv",
+    "E3_2425.csv",
+    "E0_2526.csv",
+    "E1_2526.csv",
+    "E2_2526.csv",
+    "E3_2526.csv",
+)
 EPS = 1e-15
 BOOTSTRAP_QUANTILES = (0.025, 0.975)
 
@@ -106,6 +128,44 @@ def core_probability_columns(label: str) -> list[str]:
     return [f"{mapping[label]}_{sign}" for sign in ("H", "D", "A")]
 
 
+def reference_cache_paths() -> list[Path]:
+    """Resolve REFERENCE_CACHE_FILES positionally, never via glob or sorting."""
+    paths = [Path(CACHE_DIR) / name for name in REFERENCE_CACHE_FILES]
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing frozen reference cache files: " + ", ".join(missing)
+        )
+    return paths
+
+
+def load_reference_data(*, refresh: bool) -> pd.DataFrame:
+    """
+    Load the frozen eight-file reference input used by PR #43/#44.
+
+    Season 2627 is excluded before normalization and feature engineering.
+    Additional files change same-date row ordering inside create_features(),
+    which is upstream of every later row filter, and therefore alter stateful
+    features and the CalibratedClassifierCV calibration folds. Filtering rows
+    afterwards cannot restore that ordering.
+    """
+    if refresh:
+        logger.info("Refresh requested - downloading fresh data...")
+        download_and_cache_data()
+
+    paths = reference_cache_paths()
+    logger.info(
+        "Frozen reference input (%d files, fixed order): %s",
+        len(paths),
+        ", ".join(path.name for path in paths),
+    )
+
+    df_clean = normalize_csv_data(file_paths=paths)
+    if df_clean.empty:
+        raise ValueError("Frozen reference input normalised to an empty frame")
+    return create_features(df=df_clean)
+
+
 def parse_max_date(value: str | pd.Timestamp) -> pd.Timestamp:
     """Parse the frozen benchmark window end date."""
     parsed = pd.to_datetime(value, errors="coerce")
@@ -140,12 +200,13 @@ def freeze_reference_window(
 
     source_max_date = pd.Timestamp(work["Date"].max())
     source_rows = int(len(work))
-    frozen = (
-        work.loc[work["Date"] <= cutoff]
-        .copy()
-        .sort_values("Date")
-        .reset_index(drop=True)
-    )
+    # Filtering only, deliberately no sorting and no index reset.
+    # canonicalize_history() is the single sorting authority. pandas
+    # sort_values() defaults to the unstable quicksort, so sorting here as well
+    # would reorder same-date matches relative to PR #43/#44, change the
+    # CalibratedClassifierCV(cv=3) calibration folds and therefore the model
+    # probabilities.
+    frozen = work.loc[work["Date"] <= cutoff].copy()
 
     if frozen.empty:
         raise ValueError(
@@ -1201,6 +1262,20 @@ def render_report(
         "",
         "## Sample",
         "",
+        "- The reference input is frozen to seasons 2425 and 2526 for leagues "
+        "E0-E3, matching the effective eight-file input used by PR #43/#44. "
+        "Season 2627 is excluded before normalization and feature engineering "
+        "because introducing additional files can change same-date row "
+        "ordering upstream and therefore alter stateful features and "
+        "calibration folds.",
+        "- Frozen reference input, in the exact order passed to "
+        "`normalize_csv_data()`: "
+        + ", ".join(f"`{name}`" for name in REFERENCE_CACHE_FILES)
+        + ".",
+        f"- `--max-date {max_date}` is the frozen evaluation window.",
+        "- `REFERENCE_CACHE_FILES` belongs to this frozen window. Updating the "
+        "diagnostic family to fresher data requires rerunning PR #43, PR #44 "
+        "and this report together on a new locked file set and a new window.",
         f"- Refreshed source rows before freeze: {source_row_n}.",
         f"- Refreshed source max date before freeze: {source_max_date}.",
         f"- Frozen reference-window max-date: {max_date}.",
@@ -1395,7 +1470,7 @@ def main() -> int:
         "",
     ).lower() in ("1", "true", "yes")
 
-    df = load_data(refresh=refresh)
+    df = load_reference_data(refresh=refresh)
     if df.empty:
         logger.error("No data loaded")
         return 1
