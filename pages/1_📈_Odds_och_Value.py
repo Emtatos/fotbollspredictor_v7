@@ -33,6 +33,279 @@ def _save_current_round(matches, odds, streck, source: str):
         "timestamp": datetime.now().isoformat(),
     }
 
+
+RENDER_DISK_WARNING = (
+    "Diskskrivning till `data/snapshots/` ar INTE bestandig pa Render — "
+    "filsystemet nollstalls vid omstart och deploy. Ladda alltid ner "
+    "JSON-filen till din egen enhet; nedladdningen ar den primara vagen."
+)
+
+
+def _snapshot_state_key(key_prefix: str) -> str:
+    """Session-state-nyckel for senast byggda snapshot-payload."""
+    return f"{key_prefix}_snapshot_payload"
+
+
+def _render_snapshot_save_ui(
+    matches,
+    *,
+    source: str,
+    key_prefix: str,
+    default_precision: str = "exact",
+):
+    """
+    Spara-och-ladda-ner-sektion for ett snapshot av aktuell kupong.
+
+    Nedladdningen anvander exakt samma JSON-strang som skrivs till disk.
+    """
+    from snapshot_storage import (
+        CAPTURED_AT_PRECISIONS,
+        DEFAULT_SNAPSHOT_DIR,
+        build_snapshot,
+        date_only_timestamp,
+        save_snapshot,
+        snapshot_filename,
+        snapshot_json,
+    )
+
+    st.markdown("---")
+    st.subheader("Spara snapshot av omgangen")
+    st.caption(
+        "Streck och odds som de sag ut fore spelstopp kan inte aterskapas "
+        "i efterhand. Ett sparat snapshot skrivs aldrig over."
+    )
+    st.warning(RENDER_DISK_WARNING)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        draw_raw = st.text_input(
+            "Omgangsnummer (valfritt)", key=f"{key_prefix}_draw",
+        )
+    with col2:
+        precision = st.selectbox(
+            "Tidsprecision (captured_at_precision)",
+            list(CAPTURED_AT_PRECISIONS),
+            index=list(CAPTURED_AT_PRECISIONS).index(default_precision),
+            key=f"{key_prefix}_precision",
+            help=(
+                "exact = appen tog tiden nu, date_only = bara datum kant, "
+                "unknown = tidpunkt okand. Styr om snapshotet kan anvandas "
+                "i tidsberoende analys."
+            ),
+        )
+    with col3:
+        capture_day = st.date_input(
+            "Datum (nar precision ar date_only)",
+            value=datetime.now().date(),
+            key=f"{key_prefix}_date",
+            disabled=precision != "date_only",
+        )
+    note = st.text_input("Notering (valfritt)", key=f"{key_prefix}_note")
+
+    if st.button(
+        "Spara snapshot",
+        key=f"{key_prefix}_save_btn",
+        use_container_width=True,
+    ):
+        captured_at = None
+        if precision == "date_only":
+            captured_at = date_only_timestamp(capture_day)
+        try:
+            snapshot = build_snapshot(
+                matches,
+                source=source,
+                captured_at_precision=precision,
+                draw=draw_raw.strip() or None,
+                captured_at=captured_at,
+                note=note.strip(),
+            )
+        except ValueError as exc:
+            st.error(f"Kunde inte bygga snapshot: {exc}")
+        else:
+            payload = snapshot_json(snapshot)
+            filename = snapshot_filename(snapshot)
+            written = None
+            write_error = ""
+            try:
+                written = save_snapshot(snapshot)
+            except OSError as exc:
+                write_error = str(exc)
+            st.session_state[_snapshot_state_key(key_prefix)] = {
+                "filename": written.name if written else filename,
+                "payload": payload,
+                "written": str(written) if written else "",
+                "error": write_error,
+                "match_count": len(snapshot.matches),
+            }
+
+    stored = st.session_state.get(_snapshot_state_key(key_prefix))
+    if stored:
+        if stored["written"]:
+            st.success(
+                f"Snapshot skrivet till {stored['written']} "
+                f"({stored['match_count']} matcher). "
+                "Ladda ner filen for att sakra datan."
+            )
+        else:
+            st.error(
+                "Kunde inte skriva till disk "
+                f"({stored['error'] or 'okant fel'}). "
+                "Anvand nedladdningen nedan."
+            )
+        st.download_button(
+            "Ladda ner snapshot (JSON)",
+            data=stored["payload"],
+            file_name=stored["filename"],
+            mime="application/json",
+            key=f"{key_prefix}_download_btn",
+            use_container_width=True,
+        )
+        st.caption(f"Standardkatalog pa disk: `{DEFAULT_SNAPSHOT_DIR}`.")
+
+
+def _render_snapshot_archive_section():
+    """Arkivvy: sparade snapshots, retroaktiv inmatning och resultatdata."""
+    from snapshot_storage import (
+        DEFAULT_RESULTS_DIR,
+        PAYOUT_TIERS,
+        build_result,
+        list_snapshots,
+        load_result,
+        matches_from_dataframe,
+        save_result,
+    )
+
+    st.markdown("---")
+    with st.expander("Snapshotarkiv (sparade omgangar)", expanded=False):
+        st.caption(
+            "Arkivet ar append-only: filer skrivs aldrig over och kan inte "
+            "raderas harifran."
+        )
+
+        infos = list_snapshots()
+        if not infos:
+            st.info("Inga sparade snapshots hittades pa disk.")
+        else:
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Fil": info.path.name,
+                        "Omgang": info.draw if info.draw is not None else "—",
+                        "Tidpunkt": info.captured_at,
+                        "Precision": info.captured_at_precision,
+                        "Kalla": info.source,
+                        "Matcher": info.match_count,
+                        "Notering": info.note,
+                        "Lasbar": "ja" if info.readable else "nej",
+                    }
+                    for info in infos
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown("---")
+        st.markdown("**Retroaktiv inmatning (manuell omgang)**")
+        st.caption(
+            "Fyll i lag, streck och odds for en gammal omgang. Valj "
+            "precision `date_only` nar bara datumet ar kant."
+        )
+        manual_key = "snapshot_manual_editor"
+        if manual_key not in st.session_state:
+            st.session_state[manual_key] = pd.DataFrame([
+                {
+                    "HomeTeam": "",
+                    "AwayTeam": "",
+                    "Streck1": None,
+                    "StreckX": None,
+                    "Streck2": None,
+                    "Odds1": None,
+                    "OddsX": None,
+                    "Odds2": None,
+                }
+                for _ in range(13)
+            ])
+        manual_df = st.data_editor(
+            st.session_state[manual_key],
+            num_rows="dynamic",
+            use_container_width=True,
+            key="snapshot_manual_data_editor",
+        )
+        manual_matches = matches_from_dataframe(manual_df)
+        st.caption(f"{len(manual_matches)} kompletta rader identifierade.")
+        if manual_matches:
+            _render_snapshot_save_ui(
+                manual_matches,
+                source="manual",
+                key_prefix="snapshot_manual",
+                default_precision="date_only",
+            )
+
+        st.markdown("---")
+        st.markdown("**Resultatdata i efterhand**")
+        st.caption(
+            "Skrivs i egen fil under "
+            f"`{DEFAULT_RESULTS_DIR}` och andrar aldrig snapshot-filerna. "
+            "Ingen automatisk hamtning."
+        )
+        res_col1, res_col2 = st.columns(2)
+        with res_col1:
+            result_draw = st.text_input(
+                "Omgangsnummer", key="snapshot_result_draw",
+            )
+        with res_col2:
+            turnover = st.text_input(
+                "Omsattning (valfritt)", key="snapshot_result_turnover",
+            )
+        correct_row = st.text_input(
+            "Ratt rad (13 tecken, t.ex. 1X21 1X2 1X12 1)",
+            key="snapshot_result_row",
+        )
+        payout_cols = st.columns(len(PAYOUT_TIERS))
+        payouts = {}
+        winners = {}
+        for column, tier in zip(payout_cols, PAYOUT_TIERS):
+            with column:
+                payouts[tier] = st.text_input(
+                    f"Utdelning {tier}", key=f"snapshot_result_payout_{tier}",
+                )
+                winners[tier] = st.text_input(
+                    f"Vinnare {tier}", key=f"snapshot_result_winners_{tier}",
+                )
+
+        if st.button("Spara resultatdata", key="snapshot_result_save"):
+            signs = [ch for ch in correct_row.upper() if not ch.isspace()]
+            if not result_draw.strip().isdigit():
+                st.error("Omgangsnummer maste anges som heltal.")
+            else:
+                try:
+                    result = build_result(
+                        int(result_draw.strip()),
+                        signs,
+                        turnover=turnover,
+                        payouts=payouts,
+                        winners=winners,
+                    )
+                    path = save_result(result)
+                except (ValueError, OSError) as exc:
+                    st.error(f"Kunde inte spara resultatdata: {exc}")
+                else:
+                    st.success(
+                        f"Resultat sparat till {path} "
+                        f"({len(result.correct_row)} tecken i raden)."
+                    )
+
+        lookup_draw = st.text_input(
+            "Visa sparat resultat for omgang", key="snapshot_result_lookup",
+        )
+        if lookup_draw.strip().isdigit():
+            existing = load_result(int(lookup_draw.strip()))
+            if existing is None:
+                st.info("Ingen resultatfil for den omgangen.")
+            else:
+                st.json(existing.to_dict())
+
+
 # Ladda modell och data via gemensam helper
 model, df_features, model_metadata, all_teams, MODEL_FILENAME = get_model_and_data()
 
@@ -568,6 +841,17 @@ if odds_mode == "Aktuell omgång (importera)":
                     st.markdown("**Streckrader utan matchande fixture:**")
                     for item in import_status.unmatched_streck:
                         st.caption(f"- {item}")
+
+        from snapshot_storage import matches_from_matchday_matches
+
+        _snapshot_matches = matches_from_matchday_matches(matchday_matches)
+        if _snapshot_matches:
+            _render_snapshot_save_ui(
+                _snapshot_matches,
+                source="paste",
+                key_prefix="snapshot_import",
+                default_precision="exact",
+            )
 
         st.markdown("---")
 
@@ -1111,6 +1395,19 @@ elif odds_mode == "Kupongbild (screenshot)":
                     "Notes": st.column_config.TextColumn("Anteckningar"),
                 },
             )
+
+            # -- Snapshot av de granskade kupongraderna --
+            from snapshot_storage import matches_from_dataframe
+
+            snapshot_matches = matches_from_dataframe(edited_df)
+            if snapshot_matches:
+                _render_snapshot_save_ui(
+                    snapshot_matches,
+                    source="image_scan",
+                    key_prefix="snapshot_scan",
+                    default_precision="exact",
+                )
+                st.markdown("---")
 
             # -- Bekrafta och kor analys --
             confirm_btn = st.button(
@@ -2118,3 +2415,7 @@ else:
                     "Streckjamforelsen visar skillnaden mellan folkets streck och "
                     "marknadens fair probability."
                 )
+
+# Arkivet ligger utanfor inmatningslagena: det ska nas oavsett hur omgangen
+# matades in, och det ror inte saved_matchday.json.
+_render_snapshot_archive_section()
