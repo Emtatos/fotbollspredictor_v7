@@ -231,6 +231,7 @@ def test_manual_result_defaults_to_manual_source(tmp_path):
     assert raw["entered_manually"] is True
     assert raw["source"] == "manual"
     assert raw["draw_state"] is None
+    assert raw["reg_close_time"] is None
 
 
 def test_result_file_without_new_fields_is_still_readable(tmp_path):
@@ -251,7 +252,24 @@ def test_result_file_without_new_fields_is_still_readable(tmp_path):
 
     assert loaded.source == "manual"
     assert loaded.draw_state is None
+    assert loaded.reg_close_time is None
     assert loaded.correct_row == ["1"] * 13
+
+
+def test_result_reg_close_time_is_persisted(tmp_path):
+    result = build_result(
+        4968,
+        ["1"] * 13,
+        reg_close_time="2026-08-29T15:59:00+02:00",
+    )
+    raw = json.loads(
+        save_result(result, tmp_path).read_text(encoding="utf-8")
+    )
+
+    assert raw["reg_close_time"] == "2026-08-29T15:59:00+02:00"
+    assert load_result(4968, tmp_path).reg_close_time == (
+        "2026-08-29T15:59:00+02:00"
+    )
 
 
 def test_result_rejects_unknown_source():
