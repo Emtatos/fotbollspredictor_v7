@@ -72,6 +72,12 @@ SNAPSHOT_SOURCES = (SOURCE_IMAGE_SCAN, SOURCE_PASTE, SOURCE_MANUAL)
 VALID_SIGNS = ("1", "X", "2")
 PAYOUT_TIERS = ("13", "12", "11", "10")
 
+# Kallor for efterhandsdata. Aldre resultatfiler saknar faltet och lases som
+# manuellt inmatade.
+RESULT_SOURCE_MANUAL = "manual"
+RESULT_SOURCE_API = "svenskaspel_api"
+RESULT_SOURCES = (RESULT_SOURCE_MANUAL, RESULT_SOURCE_API)
+
 _TIMESTAMP_UNSAFE = re.compile(r"[^0-9A-Za-z]")
 
 
@@ -157,6 +163,8 @@ class RoundResult:
     winners: Dict[str, Optional[float]] = field(default_factory=dict)
     entered_at: str = ""
     entered_manually: bool = True
+    source: str = RESULT_SOURCE_MANUAL
+    draw_state: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-kompatibel representation."""
@@ -172,6 +180,8 @@ class RoundResult:
             },
             "entered_at": self.entered_at,
             "entered_manually": bool(self.entered_manually),
+            "source": self.source,
+            "draw_state": self.draw_state,
         }
 
 
@@ -544,12 +554,19 @@ def build_result(
     winners: Optional[Dict[str, Any]] = None,
     entered_at: Optional[str] = None,
     entered_manually: bool = True,
+    source: str = RESULT_SOURCE_MANUAL,
+    draw_state: Optional[str] = None,
 ) -> RoundResult:
     """
     Bygger efterhandsdata for en omgang.
 
-    Kastar ValueError om raden innehaller annat an `1`, `X` eller `2`.
+    Kastar ValueError om raden innehaller annat an `1`, `X` eller `2`, eller
+    om `source` inte ar en kand kalla.
     """
+    if source not in RESULT_SOURCES:
+        raise ValueError(
+            f"source maste vara en av {RESULT_SOURCES}, fick {source!r}"
+        )
     row: List[str] = []
     for value in correct_row:
         sign = str(value).strip().upper()
@@ -573,6 +590,8 @@ def build_result(
         },
         entered_at=entered_at or utc_timestamp(),
         entered_manually=entered_manually,
+        source=source,
+        draw_state=draw_state,
     )
 
 
@@ -644,4 +663,6 @@ def load_result(
         },
         entered_at=str(raw.get("entered_at", "")),
         entered_manually=bool(raw.get("entered_manually", True)),
+        source=str(raw.get("source") or RESULT_SOURCE_MANUAL),
+        draw_state=raw.get("draw_state"),
     )

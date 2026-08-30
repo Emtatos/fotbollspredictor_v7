@@ -222,6 +222,43 @@ def test_result_file_is_separate_and_leaves_snapshot_untouched(tmp_path):
     assert load_result(4966, results_dir).correct_row == result.correct_row
 
 
+def test_manual_result_defaults_to_manual_source(tmp_path):
+    result = build_result(4966, ["1"] * 13, turnover="1000,50")
+    raw = json.loads(
+        save_result(result, tmp_path).read_text(encoding="utf-8")
+    )
+
+    assert raw["entered_manually"] is True
+    assert raw["source"] == "manual"
+    assert raw["draw_state"] is None
+
+
+def test_result_file_without_new_fields_is_still_readable(tmp_path):
+    legacy = {
+        "draw": 4900,
+        "correct_row": ["1"] * 13,
+        "turnover": 12345.0,
+        "payouts": {tier: None for tier in PAYOUT_TIERS},
+        "winners": {tier: None for tier in PAYOUT_TIERS},
+        "entered_at": "2025-05-11T09:00:00Z",
+        "entered_manually": True,
+    }
+    (tmp_path / "4900.json").write_text(
+        json.dumps(legacy), encoding="utf-8",
+    )
+
+    loaded = load_result(4900, tmp_path)
+
+    assert loaded.source == "manual"
+    assert loaded.draw_state is None
+    assert loaded.correct_row == ["1"] * 13
+
+
+def test_result_rejects_unknown_source():
+    with pytest.raises(ValueError, match="source"):
+        build_result(4966, ["1"] * 13, source="scraped")
+
+
 def test_result_row_rejects_signs_outside_1x2():
     with pytest.raises(ValueError, match="Ogiltigt tecken"):
         build_result(4966, ["1", "X", "3"])

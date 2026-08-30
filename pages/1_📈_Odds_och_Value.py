@@ -163,6 +163,195 @@ def _render_snapshot_save_ui(
         st.caption(f"Standardkatalog pa disk: `{DEFAULT_SNAPSHOT_DIR}`.")
 
 
+FETCH_STATE_KEY = "snapshot_fetch_state"
+FETCH_SAVED_KEY = "snapshot_fetch_saved"
+
+RESULT_FETCH_CAPTION = (
+    "Endpointen hos Svenska Spel ar publik men odokumenterad och "
+    "atkomststatusen bedomdes som oklar (se RESULTS_DATA_AVAILABILITY.md). "
+    "Darfor gors exakt ett anrop per knapptryckning: ingen backfill, ingen "
+    "schemalaggning och inget automatiskt omforsok. Hamtningen sparar "
+    "ingenting — granska datan och tryck `Spara resultat`."
+)
+
+
+def _fetched_review_table(fetched) -> pd.DataFrame:
+    """Granskningstabell for hamtade matchresultat."""
+    return pd.DataFrame([
+        {
+            "Nr": match.position,
+            "Match": match.description,
+            "Liga": match.league or "—",
+            "Resultat": f"{match.home_goals}-{match.away_goals}",
+            "Tecken": match.sign,
+        }
+        for match in fetched.matches
+    ])
+
+
+def _fetched_payout_table(fetched) -> pd.DataFrame:
+    """Granskningstabell for utdelning och vinnarantal."""
+    from snapshot_storage import PAYOUT_TIERS
+
+    return pd.DataFrame([
+        {
+            "Vinstgrupp": f"{tier} ratt",
+            "Utdelning": (
+                fetched.payouts.get(tier)
+                if fetched.payouts.get(tier) is not None else "saknas"
+            ),
+            "Vinnare": (
+                fetched.winners.get(tier)
+                if fetched.winners.get(tier) is not None else "saknas"
+            ),
+        }
+        for tier in PAYOUT_TIERS
+    ])
+
+
+def _render_fetch_review(fetched) -> bool:
+    """
+    Granskningsvyn for hamtad data. Returnerar om sparande ar bekraftat.
+
+    Ingenting skrivs harifran; vyn finns for att anvandaren ska kunna
+    kontrollera datan innan `Spara resultat`.
+    """
+    from svenskaspel_results import DRAW_STATE_FINALIZED
+
+    st.markdown(
+        f"Granska omgang **{fetched.draw}** "
+        f"({fetched.draw_comment or 'ingen beskrivning'}), status "
+        f"`{fetched.draw_state or 'okand'}`."
+    )
+    st.dataframe(
+        _fetched_review_table(fetched),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.markdown(f"Ratt rad: `{''.join(fetched.correct_row)}`")
+    st.markdown(
+        "Omsattning: "
+        + (
+            f"{fetched.turnover:,.2f}" if fetched.turnover is not None
+            else "saknas i svaret"
+        )
+    )
+    st.dataframe(
+        _fetched_payout_table(fetched),
+        use_container_width=True,
+        hide_index=True,
+    )
+    if fetched.missing_fields:
+        st.info(
+            "Falt som saknas i svaret och sparas som null (inget gissas): "
+            + ", ".join(fetched.missing_fields)
+            + ". Komplettera vid behov via den manuella inmatningen ovan."
+        )
+
+    if fetched.is_finalized:
+        return True
+
+    st.warning(
+        f"Omgangen har status `{fetched.draw_state or 'okand'}`, inte "
+        f"`{DRAW_STATE_FINALIZED}`. Resultatet kan vara preliminart."
+    )
+    return st.checkbox(
+        "Jag bekraftar att den icke-avslutade omgangen far sparas",
+        key="snapshot_fetch_confirm",
+    )
+
+
+def _render_result_fetch_ui():
+    """
+    Tvastegsflode: hamta resultat fran draw-endpointen, granska, spara.
+
+    Ett lyckat anrop skriver aldrig nagon fil; det gor bara knappen
+    `Spara resultat`. Vid fel skapas ingen fil overhuvudtaget.
+    """
+    from snapshot_storage import (
+        DEFAULT_RESULTS_DIR,
+        result_filename,
+        result_json,
+        save_result,
+    )
+    from svenskaspel_results import (
+        REQUEST_TIMEOUT_SECONDS,
+        USER_AGENT,
+        ResultFetchError,
+        fetch_result,
+    )
+
+    st.markdown("---")
+    st.markdown("**Hamta resultat fran Svenska Spel (manuellt)**")
+    st.caption(RESULT_FETCH_CAPTION)
+
+    fetch_draw = st.number_input(
+        "Omgangsnummer (draw)",
+        min_value=1,
+        step=1,
+        value=4966,
+        format="%d",
+        key="snapshot_fetch_draw",
+    )
+
+    if st.button(
+        "Hamta resultat fran Svenska Spel", key="snapshot_fetch_btn",
+    ):
+        st.session_state.pop(FETCH_SAVED_KEY, None)
+        try:
+            fetched = fetch_result(int(fetch_draw))
+        except ResultFetchError as exc:
+            st.session_state[FETCH_STATE_KEY] = {"error": str(exc)}
+        else:
+            st.session_state[FETCH_STATE_KEY] = {"fetched": fetched}
+
+    state = st.session_state.get(FETCH_STATE_KEY)
+    if not state:
+        st.caption(
+            f"User-Agent: `{USER_AGENT}`, timeout "
+            f"{REQUEST_TIMEOUT_SECONDS:g} s."
+        )
+        return
+
+    if state.get("error"):
+        st.error(
+            f"Hamtningen misslyckades: {state['error']} "
+            "Ingen fil har skapats. Tryck om for att forsoka igen."
+        )
+        return
+
+    fetched = state["fetched"]
+    confirmed = _render_fetch_review(fetched)
+
+    if st.button(
+        "Spara resultat", key="snapshot_fetch_save", disabled=not confirmed,
+    ):
+        result = fetched.to_round_result()
+        try:
+            path = save_result(result)
+        except OSError as exc:
+            st.error(f"Kunde inte spara resultatet: {exc}")
+        else:
+            st.session_state[FETCH_SAVED_KEY] = {
+                "path": str(path),
+                "filename": result_filename(result),
+                "payload": result_json(result),
+            }
+
+    saved = st.session_state.get(FETCH_SAVED_KEY)
+    if saved:
+        st.success(f"Resultat sparat till {saved['path']}.")
+        st.download_button(
+            "Ladda ner resultat (JSON)",
+            data=saved["payload"],
+            file_name=saved["filename"],
+            mime="application/json",
+            key="snapshot_fetch_download",
+            use_container_width=True,
+        )
+        st.caption(f"Standardkatalog pa disk: `{DEFAULT_RESULTS_DIR}`.")
+
+
 def _render_snapshot_archive_section():
     """Arkivvy: sparade snapshots, retroaktiv inmatning och resultatdata."""
     from snapshot_storage import (
@@ -294,6 +483,8 @@ def _render_snapshot_archive_section():
                         f"Resultat sparat till {path} "
                         f"({len(result.correct_row)} tecken i raden)."
                     )
+
+        _render_result_fetch_ui()
 
         lookup_draw = st.text_input(
             "Visa sparat resultat for omgang", key="snapshot_result_lookup",
