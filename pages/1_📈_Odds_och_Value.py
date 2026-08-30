@@ -181,7 +181,6 @@ def _fetched_review_table(fetched) -> pd.DataFrame:
         {
             "Nr": match.position,
             "Match": match.description,
-            "Liga": match.league or "—",
             "Resultat": f"{match.home_goals}-{match.away_goals}",
             "Tecken": match.sign,
         }
@@ -211,17 +210,14 @@ def _fetched_payout_table(fetched) -> pd.DataFrame:
 
 def _render_fetch_review(fetched) -> bool:
     """
-    Granskningsvyn for hamtad data. Returnerar om sparande ar bekraftat.
+    Granskningsvyn for hamtad data. Returnerar om resultatet far sparas.
 
     Ingenting skrivs harifran; vyn finns for att anvandaren ska kunna
     kontrollera datan innan `Spara resultat`.
     """
-    from svenskaspel_results import DRAW_STATE_FINALIZED
-
     st.markdown(
-        f"Granska omgang **{fetched.draw}** "
-        f"({fetched.draw_comment or 'ingen beskrivning'}), status "
-        f"`{fetched.draw_state or 'okand'}`."
+        f"Granska omgang **{fetched.draw}**, spelstopp "
+        f"`{fetched.reg_close_time or 'okant'}`."
     )
     st.dataframe(
         _fetched_review_table(fetched),
@@ -248,22 +244,19 @@ def _render_fetch_review(fetched) -> bool:
             + ". Komplettera vid behov via den manuella inmatningen ovan."
         )
 
-    if fetched.is_finalized:
+    if fetched.is_complete:
         return True
 
     st.warning(
-        f"Omgangen har status `{fetched.draw_state or 'okand'}`, inte "
-        f"`{DRAW_STATE_FINALIZED}`. Resultatet kan vara preliminart."
+        "Svaret ar inte strukturellt komplett (13 matcher med giltiga "
+        "utfall kravs). Resultatet kan inte sparas."
     )
-    return st.checkbox(
-        "Jag bekraftar att den icke-avslutade omgangen far sparas",
-        key="snapshot_fetch_confirm",
-    )
+    return False
 
 
 def _render_result_fetch_ui():
     """
-    Tvastegsflode: hamta resultat fran draw-endpointen, granska, spara.
+    Tvastegsflode: hamta resultat fran resultatendpointen, granska, spara.
 
     Ett lyckat anrop skriver aldrig nagon fil; det gor bara knappen
     `Spara resultat`. Vid fel skapas ingen fil overhuvudtaget.
@@ -289,7 +282,7 @@ def _render_result_fetch_ui():
         "Omgangsnummer (draw)",
         min_value=1,
         step=1,
-        value=4966,
+        value=4968,
         format="%d",
         key="snapshot_fetch_draw",
     )

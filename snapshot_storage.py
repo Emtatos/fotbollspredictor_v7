@@ -165,6 +165,7 @@ class RoundResult:
     entered_manually: bool = True
     source: str = RESULT_SOURCE_MANUAL
     draw_state: Optional[str] = None
+    reg_close_time: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-kompatibel representation."""
@@ -182,6 +183,7 @@ class RoundResult:
             "entered_manually": bool(self.entered_manually),
             "source": self.source,
             "draw_state": self.draw_state,
+            "reg_close_time": self.reg_close_time,
         }
 
 
@@ -556,6 +558,7 @@ def build_result(
     entered_manually: bool = True,
     source: str = RESULT_SOURCE_MANUAL,
     draw_state: Optional[str] = None,
+    reg_close_time: Optional[str] = None,
 ) -> RoundResult:
     """
     Bygger efterhandsdata for en omgang.
@@ -592,6 +595,7 @@ def build_result(
         entered_manually=entered_manually,
         source=source,
         draw_state=draw_state,
+        reg_close_time=reg_close_time,
     )
 
 
@@ -665,4 +669,6 @@ def load_result(
         entered_manually=bool(raw.get("entered_manually", True)),
         source=str(raw.get("source") or RESULT_SOURCE_MANUAL),
         draw_state=raw.get("draw_state"),
+        # Additivt falt: aldre resultatfiler saknar det och lases som None.
+        reg_close_time=raw.get("reg_close_time"),
     )

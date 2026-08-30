@@ -1,5 +1,6 @@
-"""Tester for manuell resultathamtning fran Svenska Spels draw-endpoint."""
+"""Tester for manuell resultathamtning fran Svenska Spels resultatendpoint."""
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -17,71 +18,37 @@ from snapshot_storage import (  # noqa: E402
     save_result,
 )
 from svenskaspel_results import (  # noqa: E402
-    DRAW_ENDPOINT,
     REQUEST_TIMEOUT_SECONDS,
+    RESULT_ENDPOINT,
     USER_AGENT,
     ResultFetchError,
-    fetch_draw_payload,
     fetch_result,
-    parse_draw_payload,
+    fetch_result_payload,
+    parse_amount,
+    parse_result_payload,
 )
 
-# 13 matchresultat: hemmavinst, bortavinst och oavgjort ska ge 1/2/X.
-SCORES = [
-    (2, 0), (0, 2), (1, 1), (3, 1), (0, 0), (1, 2), (2, 2),
-    (4, 0), (0, 1), (1, 0), (2, 1), (0, 3), (1, 1),
+FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "svenskaspel_result_4968.json"
+)
+
+# Omgang 4968 (vecka 35 2026) enligt det faktiska API-svaret.
+DRAW_4968 = 4968
+ROW_4968 = [
+    "2", "X", "2", "2", "2", "1", "X", "1", "1", "1", "X", "2", "2",
 ]
-EXPECTED_ROW = [
-    "1", "2", "X", "1", "X", "2", "X", "1", "2", "1", "1", "2", "X",
-]
+TURNOVER_4968 = 29625572.0
+REG_CLOSE_4968 = "2026-08-29T15:59:00+02:00"
+PAYOUTS_4968 = {"13": 590909.0, "12": 5919.0, "11": 357.0, "10": 91.0}
+WINNERS_4968 = {"13": 22.0, "12": 488.0, "11": 6468.0, "10": 52666.0}
 
 
-def _draw_event(number, home_goals, away_goals):
-    return {
-        "cancelled": False,
-        "eventNumber": number,
-        "eventDescription": f"Hem {number} - Borta {number}",
-        "match": {
-            "matchId": 1000 + number,
-            "league": {"name": "Championship"},
-            "result": [
-                {
-                    "sportEventResultType": "Halftime",
-                    "home": "0",
-                    "away": "0",
-                },
-                {
-                    "sportEventResultType": "Fulltime",
-                    "home": str(home_goals),
-                    "away": str(away_goals),
-                },
-            ],
-        },
-    }
-
-
-def _payload(
-    *,
-    draw_number=4966,
-    draw_state="Finalized",
-    net_sale="14740820,00",
-    scores=None,
-):
-    scores = SCORES if scores is None else scores
-    return {
-        "draw": {
-            "drawNumber": draw_number,
-            "drawState": draw_state,
-            "drawComment": "Stryktipset v. 2026-33",
-            "currentNetSale": net_sale,
-            "regCloseTime": "2026-08-15T15:59:00+02:00",
-            "drawEvents": [
-                _draw_event(index, home, away)
-                for index, (home, away) in enumerate(scores, start=1)
-            ],
-        },
-        "error": None,
-    }
+def _payload():
+    """Fixturens svar for omgang 4968 (mockat, inget natverksanrop)."""
+    with open(FIXTURE_PATH, "r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 class FakeResponse:
@@ -117,54 +84,148 @@ def call_log(monkeypatch):
     return _install
 
 
-def test_successful_fetch_maps_to_result_schema(tmp_path, call_log):
-    """Test 1: lyckad hamtning mappas till resultatschemat."""
-    call_log(lambda _n: FakeResponse(payload=_payload()))
+def test_draw_4968_maps_to_result_schema(tmp_path, call_log):
+    """Test 1: fixturen for 4968 mappas exakt till resultatschemat."""
+    calls = call_log(lambda _n: FakeResponse(payload=_payload()))
 
-    fetched = fetch_result(4966)
-    result = fetched.to_round_result()
-    path = save_result(result, directory=tmp_path)
+    fetched = fetch_result(DRAW_4968)
+    path = save_result(fetched.to_round_result(), directory=tmp_path)
     raw = json.loads(path.read_text(encoding="utf-8"))
 
-    assert path.name == "4966.json"
-    assert raw["draw"] == 4966
-    assert raw["correct_row"] == EXPECTED_ROW
-    assert raw["turnover"] == pytest.approx(14740820.0)
-    assert set(raw["payouts"]) == set(PAYOUT_TIERS)
-    assert set(raw["winners"]) == set(PAYOUT_TIERS)
+    assert len(calls) == 1
+    assert path.name == "4968.json"
+    assert raw["draw"] == DRAW_4968
+    assert raw["correct_row"] == ROW_4968
+    assert raw["turnover"] == pytest.approx(TURNOVER_4968)
+    assert raw["payouts"] == pytest.approx(PAYOUTS_4968)
+    assert raw["winners"] == pytest.approx(WINNERS_4968)
+    assert raw["reg_close_time"] == REG_CLOSE_4968
     assert raw["entered_manually"] is False
     assert raw["source"] == RESULT_SOURCE_API
-    assert raw["draw_state"] == "Finalized"
+    assert raw["draw_state"] is None
     assert raw["entered_at"]
+    assert fetched.missing_fields == []
 
-    reloaded = load_result(4966, directory=tmp_path)
-    assert reloaded.correct_row == EXPECTED_ROW
+    reloaded = load_result(DRAW_4968, directory=tmp_path)
+    assert reloaded.correct_row == ROW_4968
     assert reloaded.source == RESULT_SOURCE_API
+    assert reloaded.reg_close_time == REG_CLOSE_4968
 
 
-def test_correct_row_includes_draws_as_x():
-    """Test 2: raden harleds ur matchresultaten, oavgjort blir X."""
-    fetched = parse_draw_payload(_payload())
+def test_correct_row_comes_from_event_outcomes():
+    """Raden lases direkt ur events[].outcome."""
+    fetched = parse_result_payload(_payload())
 
-    assert fetched.correct_row == EXPECTED_ROW
-    assert [match.sign for match in fetched.matches] == EXPECTED_ROW
-    assert [
-        (match.home_goals, match.away_goals) for match in fetched.matches
-    ] == SCORES
+    assert fetched.correct_row == ROW_4968
+    assert [match.sign for match in fetched.matches] == ROW_4968
+    assert fetched.matches[0].description == "Tottenham - Newcastle"
+    assert (
+        fetched.matches[0].home_goals,
+        fetched.matches[0].away_goals,
+    ) == (0, 2)
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("590909,00", 590909.0),
+    ("29625572,00", 29625572.0),
+    ("29 625 572,00", 29625572.0),
+    ("91,50", 91.5),
+    ("22", 22.0),
+    ("", None),
+    (None, None),
+    ("okant", None),
+])
+def test_swedish_decimal_comma_is_parsed(text, expected):
+    """Test 2: belopp med svenskt decimalkomma tolkas explicit."""
+    if expected is None:
+        assert parse_amount(text) is None
+    else:
+        assert parse_amount(text) == pytest.approx(expected)
 
 
 def test_events_are_ordered_by_event_number():
-    """Raden foljer eventNumber aven om svaret kommer i annan ordning."""
+    """Test 3: raden foljer eventNumber aven vid omkastad ordning."""
     payload = _payload()
-    payload["draw"]["drawEvents"].reverse()
+    payload["result"]["events"].reverse()
 
-    assert parse_draw_payload(payload).correct_row == EXPECTED_ROW
+    assert parse_result_payload(payload).correct_row == ROW_4968
 
 
-def test_http_200_with_draw_null_is_error(tmp_path, call_log):
-    """Test 3: HTTP 200 med draw: null ger fel och ingen fil."""
+def test_wrong_event_count_is_error(tmp_path):
+    """Test 4: fler eller farre an 13 matcher ger fel och ingen fil."""
+    too_few = _payload()
+    too_few["result"]["events"] = too_few["result"]["events"][:12]
+    with pytest.raises(ResultFetchError, match="12 matcher"):
+        parse_result_payload(too_few)
+
+    too_many = _payload()
+    extra = copy.deepcopy(too_many["result"]["events"][0])
+    extra["eventNumber"] = 14
+    too_many["result"]["events"].append(extra)
+    with pytest.raises(ResultFetchError, match="14 matcher"):
+        parse_result_payload(too_many)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("outcome", ["", None, "3", "x1", "-"])
+def test_invalid_outcome_is_error(tmp_path, outcome):
+    """Test 5: utfall utanfor 1/X/2 ger fel och ingen fil."""
+    payload = _payload()
+    payload["result"]["events"][4]["outcome"] = outcome
+
+    with pytest.raises(ResultFetchError, match="ogiltigt utfall"):
+        parse_result_payload(payload)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_missing_distribution_leaves_null_values():
+    """Test 6: saknad distribution ger null-falt, inget raknas fram."""
+    payload = _payload()
+    del payload["result"]["distribution"]
+
+    fetched = parse_result_payload(payload)
+    assert all(fetched.payouts[tier] is None for tier in PAYOUT_TIERS)
+    assert all(fetched.winners[tier] is None for tier in PAYOUT_TIERS)
+    assert "payouts.13" in fetched.missing_fields
+    assert "winners.10" in fetched.missing_fields
+    # Omsattningen finns fortfarande och gissas inte fram ur utdelningen.
+    assert fetched.turnover == pytest.approx(TURNOVER_4968)
+
+    raw = fetched.to_round_result().to_dict()
+    assert raw["payouts"]["13"] is None
+    assert raw["winners"]["10"] is None
+
+
+def test_distribution_maps_by_win_div_when_name_is_missing():
+    """Vinstgruppen kan tas fran winDiv nar name saknas."""
+    payload = _payload()
+    for entry in payload["result"]["distribution"]:
+        entry.pop("name")
+
+    fetched = parse_result_payload(payload)
+    assert fetched.payouts == pytest.approx(PAYOUTS_4968)
+    assert fetched.winners == pytest.approx(WINNERS_4968)
+
+
+def test_error_field_is_error(tmp_path, call_log):
+    """Test 7: ifylld error ger fel och ingen fil."""
+    payload = _payload()
+    payload["error"] = {"code": 404, "message": "Resource Not Found"}
+    calls = call_log(lambda _n: FakeResponse(payload=payload))
+
+    with pytest.raises(ResultFetchError, match="code=404"):
+        fetch_result(DRAW_4968)
+
+    assert len(calls) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_result_null_is_error(tmp_path, call_log):
+    """Test 8: result: null (okand omgang) ger fel och ingen fil."""
     calls = call_log(lambda _n: FakeResponse(
-        payload={"draw": None, "error": None},
+        payload={"result": None, "error": None},
     ))
 
     with pytest.raises(ResultFetchError, match="finns inte"):
@@ -174,135 +235,75 @@ def test_http_200_with_draw_null_is_error(tmp_path, call_log):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_http_200_with_error_404_is_error(tmp_path, call_log):
-    """Test 4: HTTP 200 med error.code 404 ger fel och ingen fil."""
-    calls = call_log(lambda _n: FakeResponse(payload={
-        "draw": None,
-        "error": {"code": 404, "message": "Resource Not Found"},
-    }))
-
-    with pytest.raises(ResultFetchError, match="code=404"):
-        fetch_result(999999)
-
-    assert len(calls) == 1
-    assert list(tmp_path.iterdir()) == []
-
-
 def test_http_error_status_is_error(tmp_path, call_log):
     """Icke-200-status ger fel och ingen fil."""
     calls = call_log(lambda _n: FakeResponse(
-        status_code=500, payload={"error": None, "draw": None},
+        status_code=500, payload={"result": None, "error": None},
     ))
 
-    with pytest.raises(ResultFetchError):
-        fetch_result(4966)
+    with pytest.raises(ResultFetchError, match="HTTP-status 500"):
+        fetch_result(DRAW_4968)
 
     assert len(calls) == 1
     assert list(tmp_path.iterdir()) == []
 
 
 def test_network_error_is_error_without_retry(tmp_path, call_log):
-    """Test 5a: natverksfel ger fel, ingen fil, inget omforsok."""
+    """Test 9a: natverksfel ger fel, ingen fil, inget omforsok."""
     calls = call_log(
         lambda _n: requests.ConnectionError("namnuppslagning misslyckades"),
     )
 
     with pytest.raises(ResultFetchError, match="Natverksfel"):
-        fetch_result(4966)
+        fetch_result(DRAW_4968)
 
     assert len(calls) == 1
     assert list(tmp_path.iterdir()) == []
 
 
 def test_timeout_is_error_without_retry(tmp_path, call_log):
-    """Test 5b: timeout ger fel, ingen fil, inget omforsok."""
+    """Test 9b: timeout ger fel, ingen fil, inget omforsok."""
     calls = call_log(lambda _n: requests.Timeout("tiden gick ut"))
 
     with pytest.raises(ResultFetchError, match="timeout"):
-        fetch_result(4966)
+        fetch_result(DRAW_4968)
 
     assert len(calls) == 1
     assert list(tmp_path.iterdir()) == []
 
 
 def test_invalid_json_is_error(tmp_path, call_log):
-    """Test 6: ogiltig JSON ger fel och ingen fil."""
+    """Ogiltig JSON ger fel och ingen fil."""
     calls = call_log(lambda _n: FakeResponse(payload=None, text="<html>"))
 
     with pytest.raises(ResultFetchError, match="JSON"):
-        fetch_result(4966)
+        fetch_result(DRAW_4968)
 
     assert len(calls) == 1
     assert list(tmp_path.iterdir()) == []
 
 
-def test_unfinalized_draw_is_flagged_but_savable(tmp_path, call_log):
-    """Test 7: drawState != Finalized flaggas och kan sparas med status."""
-    call_log(lambda _n: FakeResponse(
-        payload=_payload(draw_state="Ongoing"),
-    ))
+def test_exactly_one_request_per_fetch(call_log):
+    """Test 10: exakt ett anrop per hamtning, mot /result-endpointen."""
+    calls = call_log(lambda _n: FakeResponse(payload=_payload()))
 
-    fetched = fetch_result(4966)
-    assert fetched.is_finalized is False
-    assert fetched.draw_state == "Ongoing"
+    fetch_result(DRAW_4968)
+    assert len(calls) == 1
+    assert calls[0]["url"] == RESULT_ENDPOINT.format(draw=DRAW_4968)
+    assert calls[0]["url"].endswith("/draws/4968/result")
 
-    path = save_result(fetched.to_round_result(), directory=tmp_path)
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    assert raw["draw_state"] == "Ongoing"
-
-
-def test_missing_payouts_stay_null():
-    """Test 8: saknad utdelning ger null-falt, inget gissas."""
-    fetched = parse_draw_payload(_payload(net_sale=None))
-
-    assert fetched.turnover is None
-    assert all(fetched.payouts[tier] is None for tier in PAYOUT_TIERS)
-    assert all(fetched.winners[tier] is None for tier in PAYOUT_TIERS)
-    assert "turnover" in fetched.missing_fields
-    assert "payouts.13" in fetched.missing_fields
-    assert "winners.10" in fetched.missing_fields
-
-    raw = json.loads(json.dumps(fetched.to_round_result().to_dict()))
-    assert raw["turnover"] is None
-    assert raw["payouts"]["13"] is None
-
-
-def test_distribution_is_used_when_present():
-    """Utdelning tas fran svaret nar den finns; annars null."""
-    payload = _payload()
-    payload["draw"]["distribution"] = [
-        {"name": "13 ratt", "winners": "5", "amount": "1119407,00"},
-        {"name": "10 ratt", "winners": "25703", "amount": "136,00"},
-    ]
-
-    fetched = parse_draw_payload(payload)
-    assert fetched.payouts["13"] == pytest.approx(1119407.0)
-    assert fetched.winners["13"] == pytest.approx(5.0)
-    assert fetched.payouts["12"] is None
-    assert fetched.winners["11"] is None
-
-
-def test_fetch_alone_creates_no_file(tmp_path, call_log):
-    """Test 9: hamtning ensam skapar ingen fil."""
-    call_log(lambda _n: FakeResponse(payload=_payload()))
-
-    fetched = fetch_result(4966)
-    fetched.to_round_result()
-    assert list(tmp_path.iterdir()) == []
-
-    save_result(fetched.to_round_result(), directory=tmp_path)
-    assert [path.name for path in tmp_path.iterdir()] == ["4966.json"]
+    fetch_result(DRAW_4968)
+    assert len(calls) == 2
 
 
 def test_user_agent_and_timeout_are_set(call_log):
-    """Test 11: identifierande User-Agent och timeout satts i anropet."""
+    """Identifierande User-Agent och timeout satts i anropet."""
     calls = call_log(lambda _n: FakeResponse(payload=_payload()))
 
-    fetch_draw_payload(4966)
+    fetch_result_payload(DRAW_4968)
 
     assert len(calls) == 1
     call = calls[0]
-    assert call["url"] == DRAW_ENDPOINT.format(draw=4966)
     assert call["headers"]["User-Agent"] == (
         "fotbollspredictor_v7 (private analysis tool; "
         "contact: emtatos@gmail.com)"
@@ -311,30 +312,57 @@ def test_user_agent_and_timeout_are_set(call_log):
     assert call["timeout"] == REQUEST_TIMEOUT_SECONDS
 
 
-def test_cancelled_or_missing_result_is_error(tmp_path, call_log):
-    """Installd match eller saknat fulltidsresultat ger fel, ingen fil."""
-    payload = _payload()
-    payload["draw"]["drawEvents"][3]["cancelled"] = True
-    calls = call_log(lambda _n: FakeResponse(payload=payload))
+def test_fetch_alone_creates_no_file(tmp_path, call_log):
+    """Test 11: hamtning ensam skapar ingen fil; bara save_result skriver."""
+    call_log(lambda _n: FakeResponse(payload=_payload()))
 
-    with pytest.raises(ResultFetchError, match="installd"):
-        fetch_result(4966)
+    fetched = fetch_result(DRAW_4968)
+    fetched.to_round_result()
+    assert list(tmp_path.iterdir()) == []
 
-    payload_missing = _payload()
-    payload_missing["draw"]["drawEvents"][2]["match"]["result"] = [
-        {"sportEventResultType": "Halftime", "home": "0", "away": "0"},
-    ]
-    with pytest.raises(ResultFetchError, match="fulltidsresultat"):
-        parse_draw_payload(payload_missing)
+    save_result(fetched.to_round_result(), directory=tmp_path)
+    assert [path.name for path in tmp_path.iterdir()] == ["4968.json"]
 
-    assert len(calls) == 1
+
+def test_null_draw_state_does_not_block_save(tmp_path, call_log):
+    """
+    Test 13: draw_state = null gissas inte och kraver ingen bekraftelse.
+
+    Sparspaerren ar strukturell kompletthet, inte omgangsstatus, sa den
+    gamla kryssrutan for icke-avslutade omgangar ar borta.
+    """
+    call_log(lambda _n: FakeResponse(payload=_payload()))
+
+    fetched = fetch_result(DRAW_4968)
+    assert fetched.draw_state is None
+    assert fetched.is_complete is True
+    assert not hasattr(fetched, "is_finalized")
+    assert not hasattr(svenskaspel_results, "DRAW_STATE_FINALIZED")
+
+    raw = json.loads(
+        save_result(
+            fetched.to_round_result(), directory=tmp_path,
+        ).read_text(encoding="utf-8")
+    )
+    assert raw["draw_state"] is None
+
+
+def test_incomplete_result_cannot_be_saved(tmp_path):
+    """Strukturellt inkompletta resultat kan inte sparas."""
+    fetched = parse_result_payload(_payload())
+    fetched.correct_row = fetched.correct_row[:12]
+
+    assert fetched.is_complete is False
+    with pytest.raises(ResultFetchError, match="komplett"):
+        fetched.to_round_result()
+
     assert list(tmp_path.iterdir()) == []
 
 
 def test_payload_without_events_is_error():
     """Svar utan matcher ger fel istallet for en tom rad."""
     payload = _payload()
-    payload["draw"]["drawEvents"] = []
+    del payload["result"]["events"]
 
-    with pytest.raises(ResultFetchError, match="drawEvents"):
-        parse_draw_payload(payload)
+    with pytest.raises(ResultFetchError, match="events"):
+        parse_result_payload(payload)
