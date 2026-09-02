@@ -27,7 +27,7 @@ from ui_utils import (
     parse_match_input_with_errors,
     calculate_match_entropy,
 )
-from combined_probability import build_combined_match, odds_to_fair_probs
+from combined_probability import combined_from_current_round, describe_sources_used
 from utils import set_canonical_teams, get_canonical_teams
 from matchday_import import _make_key
 
@@ -200,38 +200,14 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
                         data_sources.append("N/A")
                     trust_labels.append("—" if has_odds else "N/A")
 
-            # Bygg kombinerade sannolikheter med odds/streck från current_round.
-            # FIX: fallback-matcher skickar model_probs=None så att odds
-            # inte dubbelräknas (en gång som odds, en gång som model_probs).
-            combined_matches = []
-            for i, (home, away) in enumerate(matches):
-                odds_entries, streck_dict = _lookup_round_odds(home, away)
-
-                odds_1_val = odds_x_val = odds_2_val = None
-                streck_1_val = streck_x_val = streck_2_val = None
-
-                if odds_entries:
-                    odds_1_val, odds_x_val, odds_2_val = _safe_odds_values(
-                        odds_entries[0]
-                    )
-
-                if streck_dict:
-                    streck_1_val = streck_dict.get("1")
-                    streck_x_val = streck_dict.get("X")
-                    streck_2_val = streck_dict.get("2")
-
-                cm = build_combined_match(
-                    home_team=home,
-                    away_team=away,
-                    odds_1=odds_1_val,
-                    odds_x=odds_x_val,
-                    odds_2=odds_2_val,
-                    model_probs=model_probs_list[i],   # None för fallback
-                    streck_1=streck_1_val,
-                    streck_x=streck_x_val,
-                    streck_2=streck_2_val,
-                )
-                combined_matches.append(cm)
+            # Kombinerade sannolikheter via den gemensamma buildern
+            # (samma som Odds & Value).
+            combined_matches = combined_from_current_round(
+                matches=matches,
+                current_round=st.session_state.get("current_round"),
+                model_probs=model_probs_list,
+                make_key=_make_key,
+            )
 
             # Bygg resultat-tabell.
             # UI visar *kombinerade* sannolikheter i 1/X/2 — samma som
@@ -291,14 +267,7 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
                     results[idx]["Tips"] = get_halfguard_sign_combined(cm)
                     results[idx]["HALV"] = "HALV"
 
-                # Visa vilka signaler som användes
-                sources_used = []
-                if any(cm.sources["odds"] for cm in combined_matches):
-                    sources_used.append("odds (50%)")
-                if any(cm.sources["model"] for cm in combined_matches):
-                    sources_used.append("modell (35%)")
-                if any(cm.sources["streck"] for cm in combined_matches):
-                    sources_used.append("streck (15%)")
+                sources_used = describe_sources_used(combined_matches)
                 if sources_used:
                     st.caption(f"Halvgarderingar baserade på: {', '.join(sources_used)}")
                 st.caption(
