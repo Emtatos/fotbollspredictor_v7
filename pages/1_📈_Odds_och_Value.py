@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List
 
-from app_helpers import get_model_and_data, ensure_model_ready
+from app_helpers import get_model_and_data, ensure_model_ready, predict_model_probs
 
 logger = logging.getLogger(__name__)
 
@@ -554,8 +554,17 @@ from streck_analysis import (
     rank_matches_by_streck_interest,
 )
 from streck_import import auto_load_streck
-from combined_probability import build_combined_match
+from combined_probability import combined_from_matchday_matches, describe_sources_used
 from ui_utils import pick_half_guards_combined, get_halfguard_sign_combined
+
+
+def _build_coupon_combined(matchday_matches):
+    """Kombinerade sannolikheter (modell + odds + streck) för en omgång."""
+    match_pairs = [(m.home_team, m.away_team) for m in matchday_matches]
+    return combined_from_matchday_matches(
+        matchday_matches,
+        predict_model_probs(model, df_features, match_pairs),
+    )
 
 with st.expander("Ordlista: edge, value, streck", expanded=False):
     st.markdown(
@@ -1150,38 +1159,7 @@ if odds_mode == "Aktuell omgång (importera)":
             st.divider()
 
             # --- Kombinerade halvgarderingar (odds + streck + modell) ---
-            combined_matches_for_hg = []
-            for match in matchday_matches:
-                odds_1_val = None
-                odds_x_val = None
-                odds_2_val = None
-                if match.odds_report and match.odds_report.fair_probs:
-                    # Hämta genomsnittliga odds från bookmaker-odds
-                    if match.odds_report.bookmaker_odds:
-                        bm = match.odds_report.bookmaker_odds[0]
-                        odds_1_val = bm.home
-                        odds_x_val = bm.draw
-                        odds_2_val = bm.away
-
-                streck_1_val = None
-                streck_x_val = None
-                streck_2_val = None
-                if match.has_streck and match.streck:
-                    streck_1_val = match.streck.get("1")
-                    streck_x_val = match.streck.get("X")
-                    streck_2_val = match.streck.get("2")
-
-                cm = build_combined_match(
-                    home_team=match.home_team,
-                    away_team=match.away_team,
-                    odds_1=odds_1_val,
-                    odds_x=odds_x_val,
-                    odds_2=odds_2_val,
-                    streck_1=streck_1_val,
-                    streck_x=streck_x_val,
-                    streck_2=streck_2_val,
-                )
-                combined_matches_for_hg.append(cm)
+            combined_matches_for_hg = _build_coupon_combined(matchday_matches)
 
             # Visa halvgarderingsförslag
             num_hg = st.number_input(
@@ -1210,14 +1188,7 @@ if odds_mode == "Aktuell omgång (importera)":
                     })
                 st.dataframe(pd.DataFrame(hg_rows), use_container_width=True, hide_index=True)
 
-                # Visa vilka signaler som användes
-                sources_used = []
-                if any(cm.sources["odds"] for cm in combined_matches_for_hg):
-                    sources_used.append("odds (50%)")
-                if any(cm.sources["model"] for cm in combined_matches_for_hg):
-                    sources_used.append("modell (35%)")
-                if any(cm.sources["streck"] for cm in combined_matches_for_hg):
-                    sources_used.append("streck (15%)")
+                sources_used = describe_sources_used(combined_matches_for_hg)
                 if sources_used:
                     st.caption(f"Halvgarderingar baserade på: {', '.join(sources_used)}")
                 st.caption(
@@ -1815,36 +1786,7 @@ elif odds_mode == "Kupongbild (screenshot)":
                         st.divider()
 
                         # --- Kombinerade halvgarderingar (odds + streck + modell) ---
-                        combined_matches_for_hg = []
-                        for match in matchday_matches:
-                            odds_1_val = None
-                            odds_x_val = None
-                            odds_2_val = None
-                            if match.odds_report and match.odds_report.bookmaker_odds:
-                                bm = match.odds_report.bookmaker_odds[0]
-                                odds_1_val = bm.home
-                                odds_x_val = bm.draw
-                                odds_2_val = bm.away
-
-                            streck_1_val = None
-                            streck_x_val = None
-                            streck_2_val = None
-                            if match.has_streck and match.streck:
-                                streck_1_val = match.streck.get("1")
-                                streck_x_val = match.streck.get("X")
-                                streck_2_val = match.streck.get("2")
-
-                            cm = build_combined_match(
-                                home_team=match.home_team,
-                                away_team=match.away_team,
-                                odds_1=odds_1_val,
-                                odds_x=odds_x_val,
-                                odds_2=odds_2_val,
-                                streck_1=streck_1_val,
-                                streck_x=streck_x_val,
-                                streck_2=streck_2_val,
-                            )
-                            combined_matches_for_hg.append(cm)
+                        combined_matches_for_hg = _build_coupon_combined(matchday_matches)
 
                         num_hg = st.number_input(
                             "Antal halvgarderingar:",
@@ -1872,13 +1814,7 @@ elif odds_mode == "Kupongbild (screenshot)":
                                 })
                             st.dataframe(pd.DataFrame(hg_rows), use_container_width=True, hide_index=True)
 
-                            sources_used = []
-                            if any(cm.sources["odds"] for cm in combined_matches_for_hg):
-                                sources_used.append("odds (50%)")
-                            if any(cm.sources["model"] for cm in combined_matches_for_hg):
-                                sources_used.append("modell (35%)")
-                            if any(cm.sources["streck"] for cm in combined_matches_for_hg):
-                                sources_used.append("streck (15%)")
+                            sources_used = describe_sources_used(combined_matches_for_hg)
                             if sources_used:
                                 st.caption(f"Halvgarderingar baserade på: {', '.join(sources_used)}")
                             st.caption(
@@ -2019,22 +1955,7 @@ elif odds_mode == "Kupongbild (screenshot)":
                 if _ca_with_odds:
                     st.divider()
 
-                    _ca_combined = []
-                    for _m in _ca_matches:
-                        _o1 = _ox = _o2 = None
-                        if _m.odds_report and _m.odds_report.bookmaker_odds:
-                            _bm = _m.odds_report.bookmaker_odds[0]
-                            _o1, _ox, _o2 = _bm.home, _bm.draw, _bm.away
-                        _s1 = _sx = _s2 = None
-                        if _m.has_streck and _m.streck:
-                            _s1 = _m.streck.get("1")
-                            _sx = _m.streck.get("X")
-                            _s2 = _m.streck.get("2")
-                        _ca_combined.append(build_combined_match(
-                            home_team=_m.home_team, away_team=_m.away_team,
-                            odds_1=_o1, odds_x=_ox, odds_2=_o2,
-                            streck_1=_s1, streck_x=_sx, streck_2=_s2,
-                        ))
+                    _ca_combined = _build_coupon_combined(_ca_matches)
 
                     num_hg = st.number_input(
                         "Antal halvgarderingar:",
@@ -2065,13 +1986,7 @@ elif odds_mode == "Kupongbild (screenshot)":
                             hide_index=True,
                         )
 
-                        _src = []
-                        if any(c.sources["odds"] for c in _ca_combined):
-                            _src.append("odds (50%)")
-                        if any(c.sources["model"] for c in _ca_combined):
-                            _src.append("modell (35%)")
-                        if any(c.sources["streck"] for c in _ca_combined):
-                            _src.append("streck (15%)")
+                        _src = describe_sources_used(_ca_combined)
                         if _src:
                             st.caption(
                                 f"Halvgarderingar baserade på: {', '.join(_src)}"

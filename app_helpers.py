@@ -11,7 +11,7 @@ import logging
 import pandas as pd
 import numpy as np
 import os
-from typing import Optional, List, Tuple
+from typing import Optional, List, Sequence, Tuple
 
 from main import run_pipeline, get_current_season_code
 from model_handler import load_model
@@ -190,6 +190,24 @@ def predict_match(
     train/inference-mismatch.
     """
     return _predict_match_core(model, home_team, away_team, df_features, _get_feature_builder)
+
+
+def predict_model_probs(
+    model: XGBClassifier,
+    df_features: pd.DataFrame,
+    matches: Sequence[Tuple[str, str]],
+) -> List[Optional[np.ndarray]]:
+    """
+    Modellprobabiliteter per match, None där modellen saknar data.
+
+    Gemensam ingång för alla vyer som ska mata modellen in i
+    combined_probability.build_combined_matches().
+    """
+    out: List[Optional[np.ndarray]] = []
+    for home, away in matches:
+        result = predict_match(model, home, away, df_features)
+        out.append(result[0] if result is not None else None)
+    return out
 
 
 def get_openai_analysis(

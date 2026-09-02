@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from uncertainty import entropy_norm
 
@@ -189,3 +189,166 @@ def build_combined_match(
         streck_delta_x=float(sdx),
         streck_delta_2=float(sd2),
     )
+
+
+OddsTriple = Tuple[Optional[float], Optional[float], Optional[float]]
+StreckTriple = Tuple[Optional[float], Optional[float], Optional[float]]
+
+
+def build_combined_matches(
+    matches: Sequence[Tuple[str, str]],
+    odds: Sequence[Optional[OddsTriple]],
+    streck: Sequence[Optional[StreckTriple]],
+    model_probs: Sequence[Optional[np.ndarray]],
+    weights: Optional[Dict[str, float]] = None,
+) -> List[CombinedMatchProbability]:
+    """
+    Gemensam builder för kombinerade sannolikheter över en hel omgång.
+
+    Alla vyer (Odds & Value, Flera Matcher) ska anropa denna funktion så att
+    spikar, gain-ranking och halvgarderingstecken bygger på exakt samma
+    objekt oavsett vilken sida som visar dem.
+
+    Parametrar
+    ----------
+    matches : sekvens av (home_team, away_team)
+    odds : sekvens av (odds_1, odds_x, odds_2) eller None per match
+    streck : sekvens av (streck_1, streck_x, streck_2) i heltalsprocent
+        eller None per match
+    model_probs : sekvens av modellens [p1, px, p2] eller None per match
+    weights : dict, optional
+
+    Returnerar
+    ----------
+    Lista med CombinedMatchProbability i samma ordning som `matches`.
+    """
+    n = len(matches)
+    if not (len(odds) == len(streck) == len(model_probs) == n):
+        raise ValueError(
+            "matches, odds, streck och model_probs måste ha samma längd "
+            f"({n}, {len(odds)}, {len(streck)}, {len(model_probs)})"
+        )
+
+    combined: List[CombinedMatchProbability] = []
+    for i, (home, away) in enumerate(matches):
+        o = odds[i] or (None, None, None)
+        s = streck[i] or (None, None, None)
+        combined.append(build_combined_match(
+            home_team=home,
+            away_team=away,
+            odds_1=o[0],
+            odds_x=o[1],
+            odds_2=o[2],
+            model_probs=model_probs[i],
+            streck_1=s[0],
+            streck_x=s[1],
+            streck_2=s[2],
+            weights=weights,
+        ))
+    return combined
+
+
+_SOURCE_LABELS = (("odds", "odds"), ("model", "modell"), ("streck", "streck"))
+
+
+def describe_sources_used(
+    combined: Sequence[CombinedMatchProbability],
+    weights: Optional[Dict[str, float]] = None,
+) -> List[str]:
+    """
+    Beskriver vilka källor som faktiskt användes i en lista kombinerade matcher.
+
+    Returnerar t.ex. ["odds (50%)", "modell (35%, 11/13 matcher)", "streck (15%)"].
+    En källa som saknas för alla matcher utelämnas; en källa som saknas för
+    några matcher får sin täckning angiven.
+    """
+    w = weights or DEFAULT_WEIGHTS
+    n = len(combined)
+    parts: List[str] = []
+    for key, label in _SOURCE_LABELS:
+        count = sum(1 for cm in combined if cm.sources.get(key))
+        if count == 0:
+            continue
+        pct = f"{w[key]:.0%}"
+        if count == n:
+            parts.append(f"{label} ({pct})")
+        else:
+            parts.append(f"{label} ({pct}, {count}/{n} matcher)")
+    return parts
+
+
+def _odds_triple(entry) -> Optional[OddsTriple]:
+    """(home, draw, away) från OddsEntry-objekt eller dict, None om ogiltigt."""
+    if entry is None:
+        return None
+    try:
+        if hasattr(entry, "home"):
+            return float(entry.home), float(entry.draw), float(entry.away)
+        if isinstance(entry, dict):
+            return float(entry["home"]), float(entry["draw"]), float(entry["away"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    return None
+
+
+def _streck_triple(streck: Optional[Dict[str, float]]) -> Optional[StreckTriple]:
+    if not streck:
+        return None
+    return streck.get("1"), streck.get("X"), streck.get("2")
+
+
+def combined_from_matchday_matches(
+    matchday_matches: Sequence,
+    model_probs: Sequence[Optional[np.ndarray]],
+) -> List[CombinedMatchProbability]:
+    """
+    Odds & Value-vägen: bygger kombinerade sannolikheter från
+    MatchdayMatch-objekt (kupongskanning/import) plus modellprediktioner.
+    """
+    matches = [(m.home_team, m.away_team) for m in matchday_matches]
+    odds = [
+        _odds_triple(m.odds_report.bookmaker_odds[0])
+        if m.odds_report and m.odds_report.bookmaker_odds else None
+        for m in matchday_matches
+    ]
+    streck = [
+        _streck_triple(m.streck) if m.has_streck else None
+        for m in matchday_matches
+    ]
+    return build_combined_matches(matches, odds, streck, model_probs)
+
+
+def _lookup_case_insensitive(mapping: Dict[str, object], key: str):
+    if key in mapping:
+        return mapping[key]
+    low = key.lower()
+    for k, v in mapping.items():
+        if k.lower() == low:
+            return v
+    return None
+
+
+def combined_from_current_round(
+    matches: Sequence[Tuple[str, str]],
+    current_round: Optional[Dict],
+    model_probs: Sequence[Optional[np.ndarray]],
+    make_key,
+) -> List[CombinedMatchProbability]:
+    """
+    Flera Matcher-vägen: bygger kombinerade sannolikheter från inklistrade
+    matcher, odds/streck i `current_round` (session state) och
+    modellprediktioner.
+
+    `make_key(home, away)` ger nyckeln som odds/streck är lagrade under.
+    """
+    odds_by_key = (current_round or {}).get("odds") or {}
+    streck_by_key = (current_round or {}).get("streck") or {}
+
+    odds: List[Optional[OddsTriple]] = []
+    streck: List[Optional[StreckTriple]] = []
+    for home, away in matches:
+        key = make_key(home, away)
+        entries = _lookup_case_insensitive(odds_by_key, key)
+        odds.append(_odds_triple(entries[0]) if entries else None)
+        streck.append(_streck_triple(_lookup_case_insensitive(streck_by_key, key)))
+    return build_combined_matches(matches, odds, streck, model_probs)
