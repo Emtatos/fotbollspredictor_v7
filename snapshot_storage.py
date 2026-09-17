@@ -1,5 +1,10 @@
 """
-snapshot_storage.py -- Append-only arkiv for kupongomgangar.
+snapshot_storage.py -- Append-only FILarkiv for kupongomgangar. DEPRECATED.
+
+Ersatt av databasarkivet i `archive/` (Render Postgres via DATABASE_URL).
+Modulen behalls for att tolka aldre JSON-filer (se `archive.legacy`) och for
+hjalparna `matches_from_dataframe`/`matches_from_matchday_matches`. Skriv
+inga nya snapshots eller resultat till disk fran appen.
 
 Varje importerad eller scannad kupong kan sparas som ett tidsstamplat
 snapshot. Snapshots skrivs aldrig over: streck och odds som de sag ut fore

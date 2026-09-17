@@ -30,6 +30,108 @@ from ui_utils import (
 from combined_probability import combined_from_current_round, describe_sources_used
 from utils import set_canonical_teams, get_canonical_teams
 from matchday_import import _make_key
+from archive.fetch import SnapshotRequiredError, register_played_system
+from archive_ui import (
+    default_draw_number,
+    engine_or_error,
+    ensure_snapshot_for_current_round,
+    remembered_snapshot_id,
+)
+
+PLAYED_ROW_STATE_KEY = "played_row_for_archive"
+
+
+def _prob_or_none(cm, index):
+    if cm is None or cm.probs is None:
+        return None
+    return float(cm.probs[index])
+
+
+def _gain_or_none(cm):
+    """gain = nast hogsta kombinerade sannolikheten (samma som ui_utils)."""
+    if cm is None or cm.probs is None:
+        return None
+    return float(sorted(cm.probs, reverse=True)[1])
+
+
+def _render_register_played_system():
+    """Knappen `Registrera spelad rad`: sparar raden i arkivet."""
+    played = st.session_state.get(PLAYED_ROW_STATE_KEY)
+    if not played or not played.get("rows"):
+        return
+
+    st.markdown("---")
+    st.subheader("Registrera spelad rad i arkivet")
+    engine = engine_or_error()
+    if engine is None:
+        return
+
+    cr = st.session_state.get("current_round") or {}
+    suggested = default_draw_number(engine)
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        draw_raw = st.text_input(
+            "Omgangsnummer",
+            value=str(suggested) if suggested else "",
+            key="played_row_draw",
+            help="Forslaget ar den oppna omgangen i arkivet.",
+        )
+    with col2:
+        note = st.text_input("Notering (valfritt)", key="played_row_note")
+
+    if len(played["rows"]) != played["match_count"]:
+        st.warning(
+            f"{played['match_count'] - len(played['rows'])} match(er) saknar "
+            "tips och tas inte med i den registrerade raden."
+        )
+    st.caption(
+        f"Rad: `{played['tipsrad']}` · {played['n_halfguards']} halvgarderingar"
+    )
+
+    if draw_raw.strip().isdigit():
+        known = remembered_snapshot_id(int(draw_raw.strip()))
+        if known is None and cr.get("matches"):
+            st.caption(
+                "Inget snapshot finns for omgangen i den har sessionen: ett "
+                f"snapshot skapas automatiskt fran {cr.get('source', 'importen')} "
+                "innan raden registreras."
+            )
+        elif known is None:
+            st.warning(
+                "Inga marknadsdata (odds/streck) finns i sessionen. Importera "
+                "omgangen under Odds & Value eller ta ett snapshot i Arkivet "
+                "forst; en spelad rad utan snapshot kan inte registreras."
+            )
+
+    if st.button(
+        "Registrera spelad rad", type="primary", use_container_width=True,
+        key="played_row_register_btn",
+    ):
+        if not draw_raw.strip().isdigit():
+            st.error("Omgangsnummer maste anges (heltal).")
+            return
+        draw_number = int(draw_raw.strip())
+        try:
+            snapshot_id = remembered_snapshot_id(draw_number)
+            if snapshot_id is None and cr.get("matches"):
+                snapshot_id = ensure_snapshot_for_current_round(
+                    draw_number, cr, engine=engine,
+                )
+            system_id = register_played_system(
+                draw_number, played["rows"], snapshot_id,
+                note=note.strip(), engine=engine,
+            )
+        except SnapshotRequiredError as exc:
+            st.error(str(exc))
+        except Exception as exc:  # noqa: BLE001 -- visa alla fel i UI:t
+            st.error(f"Kunde inte registrera raden: {exc}")
+        else:
+            st.success(
+                f"Spelad rad #{system_id} registrerad for omgang {draw_number} "
+                f"(snapshot #{snapshot_id}, {played['n_halfguards']} "
+                "halvgarderingar)."
+            )
+
 
 # Ladda modell och data via gemensam helper
 model, df_features, model_metadata, all_teams, MODEL_FILENAME = get_model_and_data()
@@ -303,3 +405,27 @@ if st.button("⚽ Tippa Alla Matcher", type="primary", use_container_width=True)
             st.subheader("📝 Tipsrad för kopiering")
             tipsrad = "".join([r["Tips"] for r in results if r["Tips"] != "?"])
             st.code(tipsrad, language=None)
+
+            # Spara raden for registrering i arkivet (knappen nedan lever
+            # utanfor klick-blocket sa att den overlever Streamlits rerun).
+            st.session_state[PLAYED_ROW_STATE_KEY] = {
+                "rows": [
+                    {
+                        "position": i + 1,
+                        "played_signs": r["Tips"],
+                        "is_halfguard": r["HALV"] == "HALV",
+                        "combined_p1": _prob_or_none(combined_matches[i], 0),
+                        "combined_px": _prob_or_none(combined_matches[i], 1),
+                        "combined_p2": _prob_or_none(combined_matches[i], 2),
+                        "gain": _gain_or_none(combined_matches[i]),
+                        "sources_used": r["Källa"],
+                    }
+                    for i, r in enumerate(results)
+                    if r["Tips"] != "?"
+                ],
+                "n_halfguards": int(num_halfguards),
+                "tipsrad": tipsrad,
+                "match_count": len(results),
+            }
+
+_render_register_played_system()
