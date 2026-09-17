@@ -8,6 +8,8 @@ De rena hamtfunktionerna ligger i `archive.fetch` och ar Streamlit-fria.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
@@ -130,19 +132,59 @@ def snapshot_rows_from_snapshot_matches(matches: List[Any]) -> List[SnapshotRow]
     ]
 
 
-def remember_snapshot(draw_number: int, snapshot_id: int, source: str) -> None:
+def snapshot_fingerprint(rows: List[SnapshotRow]) -> str:
+    """
+    Hash av marknadsdatan (lag, streck, odds per match). Anvands for att
+    binda ett ihagkommet snapshot till exakt den data raden byggdes pa.
+    """
+    payload = [
+        [
+            r.position, r.home_team, r.away_team,
+            r.streck_1, r.streck_x, r.streck_2,
+            r.odds_1, r.odds_x, r.odds_2,
+        ]
+        for r in sorted(rows, key=lambda r: r.position)
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def current_round_fingerprint() -> Optional[str]:
+    """Fingerprint av `st.session_state["current_round"]`, eller None."""
+    current_round = st.session_state.get("current_round")
+    if not current_round or not current_round.get("matches"):
+        return None
+    return snapshot_fingerprint(snapshot_rows_from_current_round(current_round))
+
+
+def remember_snapshot(
+    draw_number: int,
+    snapshot_id: int,
+    source: str,
+    fingerprint: Optional[str] = None,
+) -> None:
     st.session_state[SNAPSHOT_STATE_KEY] = {
         "draw_number": int(draw_number),
         "snapshot_id": int(snapshot_id),
         "source": source,
+        "fingerprint": fingerprint,
     }
 
 
-def remembered_snapshot_id(draw_number: int) -> Optional[int]:
+def remembered_snapshot_id(
+    draw_number: int, fingerprint: Optional[str] = None,
+) -> Optional[int]:
+    """
+    Ihagkommet snapshot for omgangen. Anges `fingerprint` returneras id bara
+    om snapshotet togs pa exakt samma data.
+    """
     stored = st.session_state.get(SNAPSHOT_STATE_KEY)
-    if stored and int(stored.get("draw_number", -1)) == int(draw_number):
-        return int(stored["snapshot_id"])
-    return None
+    if not stored or int(stored.get("draw_number", -1)) != int(draw_number):
+        return None
+    if fingerprint is not None and stored.get("fingerprint") != fingerprint:
+        return None
+    return int(stored["snapshot_id"])
 
 
 def default_draw_number(engine: Engine) -> Optional[int]:
@@ -158,16 +200,19 @@ def ensure_snapshot_for_current_round(
     engine: Engine,
 ) -> int:
     """
-    Snapshot-id for raden som byggs fran current_round. Finns inget for
-    omgangen skapas ett forst (image_scan for kupongbild, annars paste).
+    Snapshot-id for raden som byggs fran current_round. Ett ihagkommet
+    snapshot ateranvands bara om dess fingerprint matchar aktuell data;
+    annars skapas ett nytt (image_scan for kupongbild, annars paste) sa att
+    raden aldrig kopplas till ett snapshot med annan marknadsdata.
     """
-    existing = remembered_snapshot_id(draw_number)
+    rows = snapshot_rows_from_current_round(current_round)
+    fingerprint = snapshot_fingerprint(rows)
+    existing = remembered_snapshot_id(draw_number, fingerprint)
     if existing is not None:
         return existing
     source = snapshot_source_for(current_round.get("source"))
-    rows = snapshot_rows_from_current_round(current_round)
     snapshot_id = save_snapshot(
         int(draw_number), rows, source=source, engine=engine,
     )
-    remember_snapshot(draw_number, snapshot_id, source)
+    remember_snapshot(draw_number, snapshot_id, source, fingerprint)
     return snapshot_id

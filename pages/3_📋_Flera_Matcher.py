@@ -30,12 +30,19 @@ from ui_utils import (
 from combined_probability import combined_from_current_round, describe_sources_used
 from utils import set_canonical_teams, get_canonical_teams
 from matchday_import import _make_key
-from archive.fetch import SnapshotRequiredError, register_played_system
+from archive.db import MATCH_COUNT
+from archive.fetch import (
+    IncompleteRowError,
+    SnapshotRequiredError,
+    register_played_system,
+)
 from archive_ui import (
     default_draw_number,
     engine_or_error,
     ensure_snapshot_for_current_round,
     remembered_snapshot_id,
+    snapshot_fingerprint,
+    snapshot_rows_from_current_round,
 )
 
 PLAYED_ROW_STATE_KEY = "played_row_for_archive"
@@ -52,6 +59,14 @@ def _gain_or_none(cm):
     if cm is None or cm.probs is None:
         return None
     return float(sorted(cm.probs, reverse=True)[1])
+
+
+def _row_is_complete(played) -> bool:
+    positions = {int(r["position"]) for r in played["rows"]}
+    return (
+        len(played["rows"]) == MATCH_COUNT
+        and positions == set(range(1, MATCH_COUNT + 1))
+    )
 
 
 def _render_register_played_system():
@@ -79,49 +94,52 @@ def _render_register_played_system():
     with col2:
         note = st.text_input("Notering (valfritt)", key="played_row_note")
 
-    if len(played["rows"]) != played["match_count"]:
-        st.warning(
-            f"{played['match_count'] - len(played['rows'])} match(er) saknar "
-            "tips och tas inte med i den registrerade raden."
+    complete = _row_is_complete(played)
+    if not complete:
+        st.error(
+            f"Raden ar inte komplett: {len(played['rows'])} av {MATCH_COUNT} "
+            "matcher har tips. En Stryktipsrad med farre an 13 matcher kan "
+            "inte registreras."
         )
     st.caption(
         f"Rad: `{played['tipsrad']}` · {played['n_halfguards']} halvgarderingar"
     )
 
-    if draw_raw.strip().isdigit():
-        known = remembered_snapshot_id(int(draw_raw.strip()))
-        if known is None and cr.get("matches"):
+    has_market_data = bool(cr.get("matches"))
+    if draw_raw.strip().isdigit() and has_market_data:
+        fingerprint = snapshot_fingerprint(snapshot_rows_from_current_round(cr))
+        known = remembered_snapshot_id(int(draw_raw.strip()), fingerprint)
+        if known is None:
             st.caption(
-                "Inget snapshot finns for omgangen i den har sessionen: ett "
-                f"snapshot skapas automatiskt fran {cr.get('source', 'importen')} "
-                "innan raden registreras."
+                "Inget snapshot av exakt dessa odds/streck finns i sessionen: "
+                f"ett snapshot skapas automatiskt fran "
+                f"{cr.get('source', 'importen')} innan raden registreras."
             )
-        elif known is None:
-            st.warning(
-                "Inga marknadsdata (odds/streck) finns i sessionen. Importera "
-                "omgangen under Odds & Value eller ta ett snapshot i Arkivet "
-                "forst; en spelad rad utan snapshot kan inte registreras."
-            )
+    elif not has_market_data:
+        st.warning(
+            "Inga marknadsdata (odds/streck) finns i sessionen. Importera "
+            "omgangen under Odds & Value forst; en spelad rad utan snapshot "
+            "kan inte registreras."
+        )
 
     if st.button(
         "Registrera spelad rad", type="primary", use_container_width=True,
         key="played_row_register_btn",
+        disabled=not (complete and has_market_data),
     ):
         if not draw_raw.strip().isdigit():
             st.error("Omgangsnummer maste anges (heltal).")
             return
         draw_number = int(draw_raw.strip())
         try:
-            snapshot_id = remembered_snapshot_id(draw_number)
-            if snapshot_id is None and cr.get("matches"):
-                snapshot_id = ensure_snapshot_for_current_round(
-                    draw_number, cr, engine=engine,
-                )
+            snapshot_id = ensure_snapshot_for_current_round(
+                draw_number, cr, engine=engine,
+            )
             system_id = register_played_system(
                 draw_number, played["rows"], snapshot_id,
                 note=note.strip(), engine=engine,
             )
-        except SnapshotRequiredError as exc:
+        except (IncompleteRowError, SnapshotRequiredError) as exc:
             st.error(str(exc))
         except Exception as exc:  # noqa: BLE001 -- visa alla fel i UI:t
             st.error(f"Kunde inte registrera raden: {exc}")

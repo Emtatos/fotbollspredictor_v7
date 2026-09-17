@@ -51,6 +51,7 @@ def _render_snapshot_save_ui(
     from archive.db import CAPTURED_AT_PRECISIONS, PRECISION_DATE_ONLY
     from archive.fetch import save_snapshot
     from archive_ui import (
+        current_round_fingerprint,
         default_draw_number,
         engine_or_error,
         remember_snapshot,
@@ -118,7 +119,10 @@ def _render_snapshot_save_ui(
         except Exception as exc:  # noqa: BLE001 -- visa alla fel i UI:t
             st.error(f"Kunde inte spara snapshot: {exc}")
         else:
-            remember_snapshot(int(draw_raw.strip()), snapshot_id, archive_source)
+            remember_snapshot(
+                int(draw_raw.strip()), snapshot_id, archive_source,
+                current_round_fingerprint(),
+            )
             st.success(
                 f"Snapshot #{snapshot_id} sparat for omgang "
                 f"{draw_raw.strip()} ({len(matches)} matcher, "

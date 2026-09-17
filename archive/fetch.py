@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
 from archive.db import (
@@ -86,6 +86,10 @@ class ArchiveFetchError(Exception):
 
 class ResultConflictError(Exception):
     """Ett annat resultat finns redan for omgangen. Inget skrivs over."""
+
+
+class IncompleteRowError(ValueError):
+    """Spelad rad ar inte en komplett 13-matchersrad."""
 
 
 class SnapshotRequiredError(ValueError):
@@ -699,19 +703,38 @@ def _normalize_played_rows(rows: Iterable[Any]) -> List[PlayedRow]:
             )
         else:
             raise TypeError(f"Ogiltig radtyp: {type(item).__name__}")
-        signs = "".join(
-            ch for ch in row.played_signs.upper() if ch in VALID_SIGNS
-        )
+        signs = row.played_signs.strip().upper()
         ordered = "".join(sign for sign in VALID_SIGNS if sign in signs)
-        if ordered not in VALID_PLAYED_SIGNS:
+        if not signs or any(ch not in VALID_SIGNS for ch in signs) \
+                or ordered not in VALID_PLAYED_SIGNS:
             raise ValueError(
                 f"Match {row.position}: ogiltiga tecken {row.played_signs!r}."
             )
         row.played_signs = ordered
         normalized.append(row)
-    if not normalized:
-        raise ValueError("Systemet maste innehalla minst en match.")
-    return normalized
+    validate_complete_row(normalized)
+    return sorted(normalized, key=lambda r: r.position)
+
+
+def validate_complete_row(rows: List[PlayedRow]) -> None:
+    """
+    En Stryktipsrad ar exakt 13 matcher med unika positioner 1-13. Ofullstandiga
+    rader (saknade tips, luckor, dubbletter) hor inte hemma i arkivet.
+    """
+    if len(rows) != MATCH_COUNT:
+        raise IncompleteRowError(
+            f"Raden maste ha exakt {MATCH_COUNT} matcher, fick {len(rows)}."
+        )
+    positions = [int(r.position) for r in rows]
+    duplicates = sorted({p for p in positions if positions.count(p) > 1})
+    if duplicates:
+        raise IncompleteRowError(f"Dubblettpositioner i raden: {duplicates}.")
+    missing = sorted(set(range(1, MATCH_COUNT + 1)) - set(positions))
+    if missing:
+        raise IncompleteRowError(
+            f"Raden saknar match {missing} "
+            f"(positioner maste vara 1-{MATCH_COUNT})."
+        )
 
 
 def register_played_system(
@@ -753,6 +776,16 @@ def register_played_system(
                 raise ValueError(
                     f"Snapshot {snapshot_id} tillhor omgang {snap[0]}, "
                     f"inte {draw_number}."
+                )
+            snap_rows = session.execute(
+                select(func.count()).select_from(market_snapshot_matches).where(
+                    market_snapshot_matches.c.snapshot_id == int(snapshot_id)
+                )
+            ).scalar()
+            if int(snap_rows or 0) != MATCH_COUNT:
+                raise IncompleteRowError(
+                    f"Snapshot {snapshot_id} har {snap_rows} matchrader, "
+                    f"kravs {MATCH_COUNT}."
                 )
 
         existing_ids = session.execute(

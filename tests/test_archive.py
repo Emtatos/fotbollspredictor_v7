@@ -635,3 +635,137 @@ def test_normalize_database_url_handles_render_scheme():
         "postgresql://"
     )
     assert db.normalize_database_url("sqlite:///x.db") == "sqlite:///x.db"
+
+
+# ---------------------------------------------------------------------------
+# Tillagg: provenance (fingerprint) och komplett rad
+# ---------------------------------------------------------------------------
+
+def _current_round(streck_1, odds_1, source="textpaste"):
+    from matchday_import import _make_key
+
+    class Odds:
+        def __init__(self, h, d, a):
+            self.home, self.draw, self.away = h, d, a
+
+    matches = [(f"Hem{i}", f"Bort{i}") for i in range(1, 14)]
+    return {
+        "matches": matches,
+        "odds": {_make_key(h, a): [Odds(odds_1, 4.0, 6.0)] for h, a in matches},
+        "streck": {
+            _make_key(h, a): {"1": streck_1, "X": 100 - streck_1 - 20, "2": 20}
+            for h, a in matches
+        },
+        "source": source,
+    }
+
+
+def _snapshot_market(engine, sid):
+    with db.session_scope(engine) as s:
+        return s.execute(
+            select(
+                db.market_snapshot_matches.c.streck_1,
+                db.market_snapshot_matches.c.odds_1,
+            ).where(db.market_snapshot_matches.c.snapshot_id == sid)
+        ).all()
+
+
+def test_new_market_data_never_links_row_to_old_snapshot(engine, monkeypatch):
+    """Regressionstest: current_round A -> snapshot A -> current_round B ->
+    registrera rad utan manuellt snapshot => nytt snapshot B, aldrig A."""
+    import archive_ui
+    monkeypatch.setattr(archive_ui.st, "session_state", {})
+
+    round_a = _current_round(streck_1=55, odds_1=1.5)
+    archive_ui.st.session_state["current_round"] = round_a
+    sid_a = save_snapshot(
+        4971, archive_ui.snapshot_rows_from_current_round(round_a),
+        source=SOURCE_PASTE, engine=engine,
+    )
+    archive_ui.remember_snapshot(
+        4971, sid_a, SOURCE_PASTE, archive_ui.current_round_fingerprint(),
+    )
+    assert archive_ui.remembered_snapshot_id(4971) == sid_a
+
+    round_b = _current_round(streck_1=40, odds_1=2.2)
+    archive_ui.st.session_state["current_round"] = round_b
+
+    sid_b = archive_ui.ensure_snapshot_for_current_round(4971, round_b, engine=engine)
+    assert sid_b != sid_a
+    pid = register_played_system(4971, _played_rows(), sid_b, engine=engine)
+    with db.session_scope(engine) as s:
+        linked = s.execute(
+            select(db.played_systems.c.snapshot_id)
+            .where(db.played_systems.c.id == pid)
+        ).scalar()
+    assert linked == sid_b
+    assert all((s1, o1) == (40.0, 2.2) for s1, o1 in _snapshot_market(engine, sid_b))
+    assert all((s1, o1) == (55.0, 1.5) for s1, o1 in _snapshot_market(engine, sid_a))
+
+    # Samma data igen => samma snapshot, inget nytt.
+    assert archive_ui.ensure_snapshot_for_current_round(
+        4971, round_b, engine=engine,
+    ) == sid_b
+    assert _count(engine, "market_snapshots") == 2
+
+
+def test_remembered_snapshot_without_fingerprint_is_not_reused(
+    engine, monkeypatch,
+):
+    """Snapshot sparat utan kand fingerprint (t.ex. fran Arkiv-sidan) ateranvands
+    inte for en rad byggd pa sessionsdata."""
+    import archive_ui
+    monkeypatch.setattr(archive_ui.st, "session_state", {})
+    sid = save_snapshot(4971, _snapshot_rows(), source=SOURCE_API, engine=engine)
+    archive_ui.remember_snapshot(4971, sid, SOURCE_API)
+    rnd = _current_round(streck_1=50, odds_1=1.8)
+    assert archive_ui.remembered_snapshot_id(4971) == sid
+    assert archive_ui.ensure_snapshot_for_current_round(4971, rnd, engine=engine) != sid
+
+
+def test_snapshot_fingerprint_changes_with_market_data():
+    import archive_ui
+    a = archive_ui.snapshot_rows_from_current_round(_current_round(55, 1.5))
+    b = archive_ui.snapshot_rows_from_current_round(_current_round(56, 1.5))
+    c = archive_ui.snapshot_rows_from_current_round(_current_round(55, 1.51))
+    fa = archive_ui.snapshot_fingerprint(a)
+    assert fa == archive_ui.snapshot_fingerprint(list(reversed(a)))
+    assert fa != archive_ui.snapshot_fingerprint(b)
+    assert fa != archive_ui.snapshot_fingerprint(c)
+
+
+@pytest.mark.parametrize("bad_rows, message", [
+    (_played_rows()[:12], "exakt 13"),
+    (_played_rows()[:12] + [dict(_played_rows()[11])], "Dubblettpositioner"),
+    ([dict(r, position=r["position"] + 1) for r in _played_rows()], "saknar match"),
+])
+def test_register_played_system_rejects_incomplete_rows(engine, bad_rows, message):
+    sid = save_snapshot(4971, _snapshot_rows(), source=SOURCE_PASTE, engine=engine)
+    with pytest.raises(fetch.IncompleteRowError, match=message):
+        register_played_system(4971, bad_rows, sid, engine=engine)
+    assert _count(engine, "played_systems") == 0
+
+
+def test_register_played_system_rejects_position_gap(engine):
+    sid = save_snapshot(4971, _snapshot_rows(), source=SOURCE_PASTE, engine=engine)
+    rows = _played_rows()
+    rows[12]["position"] = 14
+    with pytest.raises(fetch.IncompleteRowError, match="saknar match \\[13\\]"):
+        register_played_system(4971, rows, sid, engine=engine)
+
+
+@pytest.mark.parametrize("signs", ["", "?", "3", "H", "1-X"])
+def test_register_played_system_rejects_invalid_signs(engine, signs):
+    sid = save_snapshot(4971, _snapshot_rows(), source=SOURCE_PASTE, engine=engine)
+    rows = _played_rows()
+    rows[4]["played_signs"] = signs
+    with pytest.raises(ValueError, match="ogiltiga tecken"):
+        register_played_system(4971, rows, sid, engine=engine)
+    assert _count(engine, "played_systems") == 0
+
+
+def test_register_played_system_rejects_snapshot_with_12_rows(engine):
+    sid = save_snapshot(4971, _snapshot_rows()[:12], source=SOURCE_PASTE, engine=engine)
+    with pytest.raises(fetch.IncompleteRowError, match="12 matchrader"):
+        register_played_system(4971, _played_rows(), sid, engine=engine)
+    assert _count(engine, "played_systems") == 0
