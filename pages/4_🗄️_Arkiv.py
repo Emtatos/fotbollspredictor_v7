@@ -132,7 +132,31 @@ def _render_actions(current: Optional[RoundStatus]) -> None:
                 st.rerun()
 
 
-def _render_round(status: RoundStatus, *, expanded: bool) -> None:
+def _render_historical_fetch_result(status: RoundStatus) -> None:
+    if st.button(
+        "Hamta resultat", key=f"archive_fetch_result_{status.draw_number}",
+        help=(
+            "Hamtar ratt rad och utdelning for denna tidigare omgang. "
+            "Identiskt resultat skrivs inte om; avvikande resultat stoppas."
+        ),
+    ):
+        try:
+            fetch_result(status.draw_number, engine=engine)
+        except ResultConflictError as exc:
+            st.error(str(exc))
+        except (ResultFetchError, ArchiveFetchError) as exc:
+            st.error(f"Resultathamtning misslyckades: {exc}")
+        else:
+            _flash(
+                "success",
+                f"Resultat sparat for omgang {status.draw_number}.",
+            )
+            st.rerun()
+
+
+def _render_round(
+    status: RoundStatus, *, expanded: bool, is_current: bool,
+) -> None:
     title = (
         f"Omgang {status.draw_number}"
         f"{' · ' + status.week_label if status.week_label else ''}"
@@ -217,6 +241,9 @@ def _render_round(status: RoundStatus, *, expanded: bool) -> None:
                 f"Omsattning: {r.turnover if r.turnover is not None else '—'}"
                 f" · hamtat {_fmt_time(r.fetched_at)} · kalla {r.source}"
             )
+
+        if not is_current and status.result_state != "finalized":
+            _render_historical_fetch_result(status)
 
         if st.button(
             "Reparera omgang", key=f"archive_repair_{status.draw_number}",
@@ -318,6 +345,8 @@ _render_actions(current)
 
 st.markdown("---")
 for status in statuses:
-    _render_round(status, expanded=(status is current))
+    _render_round(
+        status, expanded=(status is current), is_current=(status is current),
+    )
 
 _render_legacy_import()
