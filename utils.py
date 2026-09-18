@@ -1,6 +1,6 @@
 # utils.py — robust namnnormlisering för E0–E2
 from __future__ import annotations
-from typing import Iterable, Optional, Set, Dict
+from typing import Iterable, List, NamedTuple, Optional, Set, Dict
 from difflib import SequenceMatcher
 import re
 
@@ -85,7 +85,7 @@ TEAM_ALIASES: Dict[str, str] = {
     "Wigan": "Wigan Athletic",
     "Luton": "Luton Town",
     "Plymouth": "Plymouth Argyle",
-    "MK Dons": "MK Dons",
+    "MK Dons": "Milton Keynes Dons",
     "Millwall": "Millwall",
     "Derby": "Derby County",
     "Portsmouth": "Portsmouth",
@@ -116,6 +116,29 @@ TEAM_ALIASES: Dict[str, str] = {
     "Stevenage": "Stevenage",
     "Wrexham": "Wrexham",
     "Wycombe": "Wycombe",
+
+    # Svenska Spel
+    # Kortformer/namn som Svenska Spel använder på kupongen (fältet `name`)
+    # samt de 9 tecken långa `mediumName`-varianterna. Målnamnen är de
+    # normaliserade lagnamn som finns i modellens träningsdata
+    # (football-data.co.uk E0–E3 efter normalize_team_name).
+    "Nottingham": "Nottingham Forest",
+    "Nottingha": "Nottingham Forest",
+    "Sheffield W": "Sheffield Wednesday",
+    "Sheff W": "Sheffield Wednesday",
+    "Sheffield U": "Sheffield United",
+    "Sheff U": "Sheffield United",
+    "Man U": "Manchester United",
+    "Manchester U": "Manchester United",
+    "Manchester C": "Manchester City",
+    "Huddersfi": "Huddersfield Town",
+    "Peterborough United": "Peterboro",
+    "Accrington Stanley": "Accrington",
+    "Burton Albion": "Burton",
+    "Crewe Alexandra": "Crewe",
+    "Wycombe Wanderers": "Wycombe",
+    "Crawley": "Crawley Town",
+    "Newport": "Newport County",
 }
 
 # Token-utbyten vi provar innan fuzzy (billiga och generella)
@@ -155,6 +178,21 @@ def _cheap_normal_forms(s: str) -> Set[str]:
 # =========================
 #  Huvud-funktionen
 # =========================
+_MIN_PREFIX_LEN = 6
+
+
+def _unique_prefix_match(s: str) -> Optional[str]:
+    """
+    Trunkerade namn (t.ex. Svenska Spels 9-teckens mediumName: 'Birmingha',
+    'Portsmout') matchas om de är prefix till exakt ett kanoniskt namn.
+    """
+    low = _lower_key(s)
+    if len(low) < _MIN_PREFIX_LEN:
+        return None
+    hits = [c for c in _CANONICAL_TEAMS if _lower_key(c).startswith(low)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def normalize_team_name(raw_name: str) -> str:
     """
     Robust normaliserare:
@@ -162,7 +200,8 @@ def normalize_team_name(raw_name: str) -> str:
       2) Manuella alias (TEAM_ALIASES)
       3) Exakta matchningar mot kända kanoniska namn (case-insensitive)
       4) Billiga normalformer → exakt match
-      5) Fuzzy-match mot kända kanoniska namn (difflib), tröskel 0.88
+      5) Unikt prefix mot kända kanoniska namn (trunkerade namn)
+      6) Fuzzy-match mot kända kanoniska namn (difflib), tröskel 0.75
     Returnerar originalet trimmat om inget hittas.
     """
     if not isinstance(raw_name, str) or not raw_name.strip():
@@ -192,7 +231,13 @@ def normalize_team_name(raw_name: str) -> str:
                 if _lower_key(c) == lowf:
                     return c
 
-    # 4) fuzzy (difflib) mot kända kanoniska
+    # 4) unikt prefix (trunkerade namn)
+    if _CANONICAL_TEAMS:
+        hit = _unique_prefix_match(s)
+        if hit is not None:
+            return hit
+
+    # 5) fuzzy (difflib) mot kända kanoniska
     if _CANONICAL_TEAMS:
         target = s.lower()
         best_c, best_r = None, 0.0
@@ -204,9 +249,42 @@ def normalize_team_name(raw_name: str) -> str:
         if best_c and best_r >= 0.75:
             return best_c
 
-    # 5) sista fallback: om aliasen delar exakt prefix
+    # 6) sista fallback: om aliasen delar exakt prefix
     for k, v in TEAM_ALIASES.items():
         if _lower_key(k) == _lower_key(s):
             return v
 
     return s
+
+
+# =========================
+#  Diagnostik
+# =========================
+class TeamNameAudit(NamedTuple):
+    raw: str
+    normalized: str
+    in_training: bool
+
+
+def audit_team_names(
+    names: Iterable[str],
+    training_teams: Optional[Iterable[str]] = None,
+) -> List[TeamNameAudit]:
+    """
+    Kör normalize_team_name() på varje namn och kontrollerar om resultatet
+    finns bland modellens träningslag (default: de kanoniska lagen som satts
+    med set_canonical_teams).
+    """
+    teams = set(training_teams) if training_teams is not None else get_canonical_teams()
+    return [
+        TeamNameAudit(raw=n, normalized=normalize_team_name(n), in_training=normalize_team_name(n) in teams)
+        for n in names
+    ]
+
+
+def unmatched_team_names(
+    names: Iterable[str],
+    training_teams: Optional[Iterable[str]] = None,
+) -> List[TeamNameAudit]:
+    """Delmängd av audit_team_names() vars normaliserade namn saknas i träningsdatan."""
+    return [a for a in audit_team_names(names, training_teams) if not a.in_training]
