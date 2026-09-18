@@ -15,7 +15,7 @@ from sqlalchemy import inspect, select, text
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from archive import db, fetch, legacy, status  # noqa: E402
+from archive import db, fetch, legacy, repair, status  # noqa: E402
 from archive.db import (  # noqa: E402
     SOURCE_API,
     SOURCE_IMAGE_SCAN,
@@ -552,6 +552,208 @@ def test_legacy_import_rejects_draw_mismatch(engine):
 
 
 # ---------------------------------------------------------------------------
+# 11b. Ordningsoberoende legacy-import + reparation (PR 53)
+# ---------------------------------------------------------------------------
+
+REG_CLOSE_4968 = "2026-08-29T14:59:00Z"
+
+
+def _legacy_result_with_close(draw=4968):
+    return dict(
+        _legacy_result(draw), reg_close_time=REG_CLOSE_4968,
+        draw_state="Finalized",
+    )
+
+
+def _match_rows(engine, draw=4968):
+    with db.session_scope(engine) as s:
+        return {
+            r.position: (r.home_team, r.away_team)
+            for r in s.execute(
+                select(db.round_matches)
+                .where(db.round_matches.c.draw_number == draw)
+            )
+        }
+
+
+def _assert_4968_complete(engine):
+    st = status.get_round_status(4968, engine=engine)
+    assert st.round_identified
+    assert st.match_count == 13
+    assert _match_rows(engine) == {i: (f"H{i}", f"A{i}") for i in range(1, 14)}
+    assert len(st.snapshots) == 1
+    assert st.result_state == "finalized"
+    assert st.status == "finalized"
+    assert st.reg_close_time == datetime(2026, 8, 29, 14, 59, tzinfo=timezone.utc)
+
+
+def test_legacy_import_result_then_snapshot(engine):
+    legacy.import_legacy_json(_legacy_result_with_close(), engine=engine)
+    st = status.get_round_status(4968, engine=engine)
+    assert st.match_count == 0 and not st.round_identified
+    legacy.import_legacy_json(_legacy_snapshot(), engine=engine)
+    _assert_4968_complete(engine)
+
+
+def test_legacy_import_snapshot_then_result(engine):
+    legacy.import_legacy_json(_legacy_snapshot(), engine=engine)
+    legacy.import_legacy_json(_legacy_result_with_close(), engine=engine)
+    _assert_4968_complete(engine)
+
+
+def test_legacy_result_without_match_data_creates_no_matches(engine):
+    legacy.import_legacy_json(_legacy_result_with_close(), engine=engine)
+    assert _count(engine, "round_matches") == 0
+    st = status.get_round_status(4968, engine=engine)
+    assert st.result.correct_row == ROW_4968
+    assert st.result.turnover == 59_836_398.0
+    assert st.result.payouts["13"] == 4207374.0
+    assert st.result.winners["10"] == 40000
+    assert st.status == "finalized"
+    assert st.reg_close_time == datetime(2026, 8, 29, 14, 59, tzinfo=timezone.utc)
+    assert _count(engine, "result_matches") == 13
+
+
+def test_legacy_result_with_verifiable_matches_creates_them(engine):
+    payload = dict(_legacy_result(), matches=[
+        {"position": i, "home_team": f"H{i}", "away_team": f"A{i}"}
+        for i in range(1, 14)
+    ])
+    legacy.import_legacy_json(payload, engine=engine)
+    assert _count(engine, "round_matches") == 13
+
+
+def test_legacy_snapshot_fills_matches_on_existing_round(engine):
+    fetch.ensure_round(4968, engine=engine, status="finalized")
+    assert _count(engine, "round_matches") == 0
+    legacy.import_legacy_json(_legacy_snapshot(), engine=engine)
+    assert _count(engine, "round_matches") == 13
+    st = status.get_round_status(4968, engine=engine)
+    assert st.status == "finalized"
+    assert st.round_identified
+
+
+def _make_4968_broken_state(engine):
+    """Produktionslaget: rounds + resultat + snapshot finns, round_matches tom."""
+    legacy.import_legacy_json(_legacy_result(), engine=engine)
+    with db.session_scope(engine) as s:
+        s.execute(db.market_snapshots.insert().values(
+            id=5, draw_number=4968,
+            captured_at=datetime(2026, 8, 29, 10, 0, tzinfo=timezone.utc),
+            captured_at_precision="exact", source=SOURCE_LEGACY_IMPORT,
+            parser_version=0, raw_payload=_legacy_snapshot(),
+        ))
+    with db.session_scope(engine) as s:
+        s.execute(
+            db.results.update()
+            .where(db.results.c.draw_number == 4968)
+            .values(raw_payload=_legacy_result_with_close())
+        )
+    st = status.get_round_status(4968, engine=engine)
+    assert not st.round_identified and st.match_count == 0
+    assert st.reg_close_time is None
+    assert [s.id for s in st.snapshots] == [5]
+
+
+def test_repair_round_fills_4968_from_existing_snapshot(engine):
+    _make_4968_broken_state(engine)
+    outcome = repair.repair_round(4968, engine=engine)
+    assert outcome.matches_inserted == 13
+    assert outcome.match_count == 13
+    assert outcome.conflicts == []
+    assert outcome.reg_close_time_filled
+    assert outcome.changed
+    _assert_4968_complete(engine)
+    assert [s.id for s in status.get_round_status(4968, engine=engine).snapshots] == [5]
+    assert _count(engine, "market_snapshots") == 1
+    assert _count(engine, "results") == 1
+
+
+def test_repair_round_is_idempotent(engine):
+    _make_4968_broken_state(engine)
+    repair.repair_round(4968, engine=engine)
+    before = _match_rows(engine)
+    second = repair.repair_round(4968, engine=engine)
+    assert second.matches_inserted == 0
+    assert not second.reg_close_time_filled
+    assert not second.status_finalized
+    assert not second.changed
+    assert second.match_count == 13
+    assert _match_rows(engine) == before
+    assert _count(engine, "round_matches") == 13
+    assert _count(engine, "market_snapshots") == 1
+    assert _count(engine, "results") == 1
+
+
+def test_repair_round_makes_no_network_calls(engine):
+    _make_4968_broken_state(engine)
+    repair.repair_round(4968, engine=engine)  # autouse-fixturen forbjuder natverk
+
+
+def test_repair_round_unknown_draw(engine):
+    with pytest.raises(repair.RoundNotFound):
+        repair.repair_round(1234, engine=engine)
+
+
+def test_repair_round_from_api_snapshot_payload(engine):
+    fetch.ensure_round(4971, engine=engine, status="closed")
+    with db.session_scope(engine) as s:
+        s.execute(db.market_snapshots.insert().values(
+            draw_number=4971, captured_at=fetch.now_utc(),
+            captured_at_precision="exact", source=SOURCE_API,
+            parser_version=1, raw_payload=DRAW_4971,
+        ))
+    outcome = repair.repair_round(4971, engine=engine)
+    assert outcome.matches_inserted == 13 and outcome.match_count == 13
+
+
+def test_team_name_conflict_keeps_existing_and_warns(engine, caplog):
+    legacy.import_legacy_json(_legacy_snapshot(), engine=engine)
+    conflicting = _legacy_snapshot()
+    conflicting["captured_at"] = "2026-08-30T10:00:00Z"
+    conflicting["matches"][0]["home_team"] = "Annat Lag"
+    with caplog.at_level("WARNING", logger="archive.fetch"):
+        legacy.import_legacy_json(conflicting, engine=engine)
+    assert _match_rows(engine)[1] == ("H1", "A1")
+    assert _count(engine, "round_matches") == 13
+    assert any(
+        "Annat Lag" in r.getMessage() and "behalls" in r.getMessage()
+        for r in caplog.records
+    )
+
+    with caplog.at_level("WARNING", logger="archive.fetch"):
+        outcome = repair.repair_round(4968, engine=engine)
+    assert outcome.conflicts == [1]
+    assert outcome.matches_inserted == 0
+    assert _match_rows(engine)[1] == ("H1", "A1")
+
+
+def test_legacy_result_fills_reg_close_time_without_overwriting(engine):
+    fetch.ensure_round(4968, engine=engine, status="closed")
+    st = status.get_round_status(4968, engine=engine)
+    assert st.reg_close_time is None
+    legacy.import_legacy_json(_legacy_result_with_close(), engine=engine)
+    st = status.get_round_status(4968, engine=engine)
+    assert st.reg_close_time == datetime(2026, 8, 29, 14, 59, tzinfo=timezone.utc)
+
+    existing = datetime(2026, 9, 5, 14, 59, tzinfo=timezone.utc)
+    fetch.ensure_round(4969, engine=engine, reg_close_time=existing)
+    legacy.import_legacy_json(
+        dict(_legacy_result_with_close(4969), correct_row=list("1" * 13)),
+        engine=engine,
+    )
+    assert status.get_round_status(4969, engine=engine).reg_close_time == existing
+    with db.session_scope(engine) as s:
+        s.execute(
+            db.results.update().where(db.results.c.draw_number == 4969)
+            .values(raw_payload=_legacy_result_with_close(4969))
+        )
+    outcome = repair.repair_round(4969, engine=engine)
+    assert not outcome.reg_close_time_filled
+    assert status.get_round_status(4969, engine=engine).reg_close_time == existing
+
+
+# ---------------------------------------------------------------------------
 # 12. Statusharledning
 # ---------------------------------------------------------------------------
 
@@ -585,7 +787,7 @@ def test_status_derivation(engine):
 def test_fetch_modules_do_not_import_streamlit():
     code = (
         "import sys; import archive.fetch, archive.db, archive.status, "
-        "archive.legacy; "
+        "archive.legacy, archive.repair; "
         "assert 'streamlit' not in sys.modules, 'streamlit importerad'"
     )
     subprocess.run(

@@ -391,6 +391,97 @@ def _upsert_round(session, rnd: Round) -> None:
             )
 
 
+@dataclass
+class MatchMergeOutcome:
+    """Resultat av `merge_round_matches`: inga rader raderas eller skrivs over."""
+    inserted: int = 0
+    kept: int = 0
+    conflicts: List[int] = field(default_factory=list)
+
+
+def ensure_round_row(
+    session,
+    draw_number: int,
+    *,
+    week_label: Optional[str] = None,
+    reg_close_time: Optional[datetime] = None,
+    status: str = ROUND_STATUS_CLOSED,
+) -> bool:
+    """
+    Ser till att `rounds`-raden finns och fyller bara tomma metadatafalt
+    (`week_label`, `reg_close_time`). Befintliga varden och status rors
+    inte. Returnerar True om `reg_close_time` fylldes i.
+    """
+    existing = session.execute(
+        select(rounds.c.week_label, rounds.c.reg_close_time).where(
+            rounds.c.draw_number == int(draw_number)
+        )
+    ).mappings().first()
+    if existing is None:
+        session.execute(rounds.insert().values(
+            draw_number=int(draw_number), created_at=now_utc(),
+            week_label=week_label, reg_close_time=reg_close_time,
+            status=status,
+        ))
+        return reg_close_time is not None
+    fill: Dict[str, Any] = {}
+    if existing["week_label"] is None and week_label:
+        fill["week_label"] = week_label
+    if existing["reg_close_time"] is None and reg_close_time is not None:
+        fill["reg_close_time"] = reg_close_time
+    if fill:
+        session.execute(
+            rounds.update()
+            .where(rounds.c.draw_number == int(draw_number))
+            .values(**fill)
+        )
+    return "reg_close_time" in fill
+
+
+def merge_round_matches(
+    session, draw_number: int, matches: Iterable[RoundMatch],
+) -> MatchMergeOutcome:
+    """
+    Lagger till saknade `round_matches` pa (draw_number, position). Befintliga
+    rader behalls alltid; skiljer sig inkommande lagnamn loggas en varning
+    och den sparade raden vinner. Idempotent.
+    """
+    outcome = MatchMergeOutcome()
+    draw = int(draw_number)
+    present = {
+        row["position"]: row
+        for row in session.execute(
+            select(round_matches).where(round_matches.c.draw_number == draw)
+        ).mappings()
+    }
+    for match in matches:
+        home = (match.home_team or "").strip()
+        away = (match.away_team or "").strip()
+        if not home or not away:
+            continue
+        current = present.get(int(match.position))
+        if current is None:
+            session.execute(round_matches.insert().values(
+                draw_number=draw, position=int(match.position),
+                home_team=home, away_team=away,
+                home_team_canon=_canon(home), away_team_canon=_canon(away),
+                league=match.league,
+            ))
+            outcome.inserted += 1
+            continue
+        if (current["home_team"], current["away_team"]) != (home, away):
+            logger.warning(
+                "Omgang %s match %s: inkommande %r - %r skiljer sig fran "
+                "sparad %r - %r; befintlig rad behalls.",
+                draw, match.position, home, away,
+                current["home_team"], current["away_team"],
+            )
+            outcome.conflicts.append(int(match.position))
+        else:
+            outcome.kept += 1
+    return outcome
+
+
 def ensure_round(
     draw_number: int,
     *,
@@ -484,21 +575,11 @@ def save_snapshot(
         raise ValueError("Snapshot maste innehalla minst en match.")
     moment = captured_at or now_utc()
     with session_scope(engine) as session:
-        present = session.execute(
-            select(rounds.c.draw_number).where(
-                rounds.c.draw_number == int(draw_number)
-            )
-        ).first()
-        if present is None:
-            round_rows = [
-                RoundMatch(r.position, r.home_team, r.away_team, r.league)
-                for r in row_list if r.home_team and r.away_team
-            ]
-            _upsert_round(session, Round(
-                draw_number=int(draw_number), week_label=None,
-                reg_close_time=None, status=ROUND_STATUS_CLOSED,
-                matches=round_rows,
-            ))
+        ensure_round_row(session, int(draw_number))
+        merge_round_matches(session, int(draw_number), [
+            RoundMatch(r.position, r.home_team, r.away_team, r.league)
+            for r in row_list if r.home_team and r.away_team
+        ])
         result = session.execute(market_snapshots.insert().values(
             draw_number=int(draw_number),
             captured_at=moment,
@@ -629,23 +710,16 @@ def save_result(
             )
             return False
 
-        present = session.execute(
-            select(rounds.c.draw_number).where(
-                rounds.c.draw_number == fetched.draw
-            )
-        ).first()
-        if present is None:
-            _upsert_round(session, Round(
-                draw_number=fetched.draw, week_label=None,
-                reg_close_time=parse_timestamp(fetched.reg_close_time),
-                status=ROUND_STATUS_FINALIZED, matches=[],
-            ))
-        else:
-            session.execute(
-                rounds.update()
-                .where(rounds.c.draw_number == fetched.draw)
-                .values(status=ROUND_STATUS_FINALIZED)
-            )
+        ensure_round_row(
+            session, fetched.draw,
+            reg_close_time=parse_timestamp(fetched.reg_close_time),
+            status=ROUND_STATUS_FINALIZED,
+        )
+        session.execute(
+            rounds.update()
+            .where(rounds.c.draw_number == fetched.draw)
+            .values(status=ROUND_STATUS_FINALIZED)
+        )
         session.execute(results.insert().values(
             draw_number=fetched.draw,
             fetched_at=fetched_at or now_utc(),
