@@ -26,7 +26,9 @@ from archive.db import (
     session_scope,
 )
 from archive.fetch import (
+    RoundMatch,
     SnapshotRow,
+    merge_round_matches,
     parse_timestamp,
     save_result,
     save_snapshot,
@@ -118,6 +120,27 @@ def _float(value: Any) -> Optional[float]:
 def _int(value: Any) -> Optional[int]:
     number = _float(value)
     return None if number is None else int(number)
+
+
+def verifiable_matches(payload: Dict[str, Any]) -> List[RoundMatch]:
+    """
+    `matches[]` med bade hemma- och bortalag ur en legacy-payload. Rader utan
+    lagnamn hoppas over; `correct_row` anvands aldrig som kalla for lag.
+    """
+    matches: List[RoundMatch] = []
+    for index, item in enumerate(payload.get("matches") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        home = str(item.get("home_team") or "").strip()
+        away = str(item.get("away_team") or "").strip()
+        if not home or not away:
+            continue
+        matches.append(RoundMatch(
+            position=_int(item.get("position")) or index,
+            home_team=home, away_team=away,
+            league=item.get("league") or None,
+        ))
+    return matches
 
 
 def import_snapshot_payload(
@@ -221,6 +244,10 @@ def import_result_payload(
         raise DuplicateImport(
             f"Resultat for omgang {draw} finns redan i arkivet."
         )
+    matches = verifiable_matches(payload)
+    if matches:
+        with session_scope(engine) as session:
+            merge_round_matches(session, draw, matches)
     return LegacyImportOutcome(KIND_RESULT, draw)
 
 

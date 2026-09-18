@@ -26,6 +26,7 @@ from archive.legacy import (
     LegacyImportError,
     import_legacy_json,
 )
+from archive.repair import RoundNotFound, repair_round
 from archive.status import RoundStatus, list_round_status
 from archive_ui import engine_or_error
 from svenskaspel_results import ResultFetchError
@@ -216,6 +217,41 @@ def _render_round(status: RoundStatus, *, expanded: bool) -> None:
                 f"Omsattning: {r.turnover if r.turnover is not None else '—'}"
                 f" · hamtat {_fmt_time(r.fetched_at)} · kalla {r.source}"
             )
+
+        if st.button(
+            "Reparera omgang", key=f"archive_repair_{status.draw_number}",
+            help=(
+                "Fyller pa saknade matcher och spelstopp fran omgangens redan "
+                "sparade snapshots och resultat. Inget natverksanrop, inget "
+                "nytt snapshot eller resultat."
+            ),
+        ):
+            try:
+                outcome = repair_round(status.draw_number, engine=engine)
+            except RoundNotFound as exc:
+                st.error(str(exc))
+            else:
+                if outcome.changed:
+                    _flash(
+                        "success",
+                        f"Omgang {status.draw_number} reparerad: "
+                        f"{outcome.matches_inserted} matcher tillagda "
+                        f"({outcome.match_count} totalt)"
+                        + (", spelstopp ifyllt" if outcome.reg_close_time_filled else "")
+                        + (
+                            f", {len(outcome.conflicts)} lagkonflikter behallna"
+                            if outcome.conflicts else ""
+                        )
+                        + ".",
+                    )
+                else:
+                    _flash(
+                        "info",
+                        f"Omgang {status.draw_number}: inget att reparera "
+                        f"({outcome.match_count} matcher, "
+                        f"{outcome.snapshots_scanned} snapshots genomsokta).",
+                    )
+                st.rerun()
 
 
 def _render_legacy_import() -> None:
