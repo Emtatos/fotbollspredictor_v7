@@ -971,3 +971,98 @@ def test_register_played_system_rejects_snapshot_with_12_rows(engine):
     with pytest.raises(fetch.IncompleteRowError, match="12 matchrader"):
         register_played_system(4971, _played_rows(), sid, engine=engine)
     assert _count(engine, "played_systems") == 0
+
+
+# ---------------------------------------------------------------------------
+# PR #54. Arkiv-sidan: "Hamta resultat" per historisk omgang
+# ---------------------------------------------------------------------------
+
+ARKIV_PAGE = ROOT / "pages" / "4_🗄️_Arkiv.py"
+
+
+def _arkiv_app(engine, monkeypatch):
+    """Kor Arkiv-sidan mot given engine; ingen DATABASE_URL behovs."""
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setattr(db, "get_engine", lambda url=None: engine)
+    import archive_ui
+    monkeypatch.setattr(archive_ui, "get_engine", lambda url=None: engine)
+    return AppTest.from_file(str(ARKIV_PAGE), default_timeout=30).run()
+
+
+def _button(app, key):
+    matches = [b for b in app.button if b.key == key]
+    return matches[0] if matches else None
+
+
+def test_arkiv_historical_fetch_result_button_visibility(engine, monkeypatch):
+    fetch.ensure_round(4971, engine=engine, status="open")
+    fetch.ensure_round(4970, engine=engine, status="closed")
+    fetch.ensure_round(4968, engine=engine, status="closed")
+    import svenskaspel_results
+    monkeypatch.setattr(
+        svenskaspel_results.requests, "get",
+        _api({"/draws/4968/result": RESULT_4968}),
+    )
+    fetch_result(4968, engine=engine)
+
+    app = _arkiv_app(engine, monkeypatch)
+    assert not app.exception
+    # Aktuell (oppen) omgang: bara den globala knappen, ingen per-omgang-knapp.
+    assert _button(app, "archive_fetch_result") is not None
+    assert _button(app, "archive_fetch_result_4971") is None
+    # Historisk utan resultat: knappen visas.
+    assert _button(app, "archive_fetch_result_4970") is not None
+    # Historisk med resultat (finalized): ingen knapp.
+    assert _button(app, "archive_fetch_result_4968") is None
+
+
+def test_arkiv_historical_fetch_result_calls_fetch_result(engine, monkeypatch):
+    fetch.ensure_round(4971, engine=engine, status="open")
+    fetch.ensure_round(4968, engine=engine, status="closed")
+    called = []
+    real_fetch_result = fetch.fetch_result
+
+    def _spy(draw_number, *, engine=None, **kwargs):
+        called.append(int(draw_number))
+        return real_fetch_result(draw_number, engine=engine, **kwargs)
+
+    import svenskaspel_results
+    monkeypatch.setattr(
+        svenskaspel_results.requests, "get",
+        _api({"/draws/4968/result": RESULT_4968}),
+    )
+    app = _arkiv_app(engine, monkeypatch)
+    # Sidan importerar `fetch_result` med from-import; patcha kallan innan
+    # nasta korning sa att spionen traffas nar skriptet importeras om.
+    monkeypatch.setattr(fetch, "fetch_result", _spy)
+    _button(app, "archive_fetch_result_4968").click().run()
+    assert not app.exception
+    assert called == [4968]
+    assert any("Resultat sparat for omgang 4968" in s.value for s in app.success)
+    st = status.get_round_status(4968, engine=engine)
+    assert st.result_state == "finalized"
+    assert st.result.correct_row == ROW_4968
+    assert st.reg_close_time is not None
+    # Efter rerun: knappen forsvinner, resultatet visas.
+    assert _button(app, "archive_fetch_result_4968") is None
+    assert any(c.value == ROW_4968 for c in app.code)
+
+
+def test_arkiv_historical_fetch_result_surfaces_conflict(engine, monkeypatch):
+    """ResultConflictError fran fetch_result() visas som fel; ingen success."""
+    fetch.ensure_round(4971, engine=engine, status="open")
+    fetch.ensure_round(4968, engine=engine, status="closed")
+    app = _arkiv_app(engine, monkeypatch)
+    btn = _button(app, "archive_fetch_result_4968")
+    assert btn is not None
+
+    def _conflict(draw_number, *, engine=None, **kwargs):
+        raise ResultConflictError(f"Resultatkonflikt for omgang {draw_number}")
+
+    monkeypatch.setattr(fetch, "fetch_result", _conflict)
+    btn.click().run()
+    assert not app.exception
+    assert any("Resultatkonflikt for omgang 4968" in e.value for e in app.error)
+    assert not app.success
+    assert _count(engine, "results") == 0
+    assert status.get_round_status(4968, engine=engine).result_state == "waiting"
